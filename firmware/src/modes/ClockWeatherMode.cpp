@@ -1003,12 +1003,13 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
         int ampmW = PixelFont::stringWidth(ampmBuf);
 
         if (animMode) {
-            // GIF mode: no icon, show temp + rain end time (stacked, 5x7 font)
+            // GIF mode: temp + rain end time, with breathing room
+            int animGap = 8;
             char tempLine[8];
             snprintf(tempLine, sizeof(tempLine), "%dF", _weather.temp);
             int tempLineW = tempStrWidth(tempLine);
 
-            // Find when precipitation ends from hourly forecast
+            // Find when precipitation ends
             char endLine[10] = "";
             struct tm now_tm;
             if (getLocalTime(&now_tm) && _weather.hourlyCount >= 24) {
@@ -1016,7 +1017,6 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
                 int clearHour = -1;
                 for (int h = curHour + 1; h < 24; h++) {
                     int wmo = _weather.hourlyWMO[h];
-                    // WMO precip codes: 51-67 (drizzle/rain), 71-77 (snow), 80-86 (showers), 95-99 (storm)
                     bool precip = (wmo >= 51 && wmo <= 67) || (wmo >= 71 && wmo <= 77) ||
                                   (wmo >= 80 && wmo <= 86) || (wmo >= 95 && wmo <= 99);
                     if (!precip) { clearHour = h; break; }
@@ -1032,8 +1032,8 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
             }
             int endLineW = (endLine[0]) ? PixelFont::stringWidth(endLine) : 0;
 
-            int weatherW = max(tempLineW, endLineW);
-            int total = timeW + 1 + ampmW + gap + weatherW;
+            int weatherW = max(tempLineW, (int)(7 + 2 + endLineW));
+            int total = timeW + 1 + ampmW + animGap + weatherW;
             int xStart = max(0, (Framebuffer::W - total) / 2);
             int ty = max(0, (VISIBLE_H - digitH) / 2);
 
@@ -1042,18 +1042,33 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
             PixelFont::drawString(fb, ampmBuf, cx + 1, ampmY, timeColor);
             cx += 1 + ampmW;
 
-            int wx = cx + gap;
+            int wx = cx + animGap;
             drawTempStr(fb, tempLine, wx, 0, tempClr);
             if (endLine[0]) {
+                // Tiny 3x5 blue raindrop + end time
+                RGB drop = {30, 60, 140};
+                int dx = wx, dy = 9;
+                fb.putPixel(dx+1, dy,   drop);
+                fb.putPixel(dx,   dy+1, drop);
+                fb.putPixel(dx+1, dy+1, drop);
+                fb.putPixel(dx+2, dy+1, drop);
+                fb.putPixel(dx,   dy+2, drop);
+                fb.putPixel(dx+1, dy+2, drop);
+                fb.putPixel(dx+2, dy+2, drop);
+                fb.putPixel(dx,   dy+3, drop);
+                fb.putPixel(dx+1, dy+3, drop);
+                fb.putPixel(dx+2, dy+3, drop);
+                fb.putPixel(dx+1, dy+4, drop);
                 RGB dimClr = {tempClr.r / 2, tempClr.g / 2, tempClr.b / 2};
-                PixelFont::drawString(fb, endLine, wx, 9, dimClr);
+                PixelFont::drawString(fb, endLine, wx + 5, 9, dimClr);
             }
             _iconRegionValid = false;
         } else {
             // Normal mode: icon + temp
+            int normalGap = 6;
             int bigIconW = WeatherIcons::iconWidth(_weather.icon.c_str());
             int bigIconH = WeatherIcons::iconHeight(_weather.icon.c_str());
-            int total = timeW + 1 + ampmW + gap + bigIconW + 3 + tempW;
+            int total = timeW + 1 + ampmW + normalGap + bigIconW + 3 + tempW;
             int xStart = max(0, (Framebuffer::W - total) / 2);
             int ty = max(0, (VISIBLE_H - digitH) / 2);
 
@@ -1062,7 +1077,7 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
             PixelFont::drawString(fb, ampmBuf, cx + 1, ampmY, timeColor);
             cx += 1 + ampmW;
 
-            int ix = cx + gap;
+            int ix = cx + normalGap;
             int iy = max(0, (VISIBLE_H - bigIconH) / 2);
             WeatherIcons::drawFrame(fb, _weather.icon.c_str(), ix, iy, iconClr, _animFrame);
             _iconRx0 = ix; _iconRy0 = iy;
@@ -1445,10 +1460,9 @@ static bool headlineMatches(const String& title) {
     // Supreme Court/SCOTUS requires an action word — not speculation
     if (lower.indexOf("supreme court") >= 0 || lower.indexOf("scotus") >= 0) {
         static const char* scotusAction[] = {
-            "rules", "ruled", "ruling", "strikes", "struck",
             "overturns", "overturned", "upheld", "upholds",
-            "blocks", "blocked", "5-4", "6-3", "7-2", "9-0",
-            "unanimous", "dissent",
+            "strikes down", "5-4", "6-3", "7-2", "9-0",
+            "unanimous",
             nullptr
         };
         for (int i = 0; scotusAction[i]; i++)
@@ -1462,7 +1476,7 @@ static bool headlineMatches(const String& title) {
         "executive order",
         "overturned", "struck down", "upheld",
         "mass shooting", "shooter", "assassination", "assassinated",
-        "bombing", "terrorist", "declare war", "invasion",
+        "bombing", "terrorist", "declare war", "invasion", "invades",
         "earthquake", "hurricane", "tornado", "wildfire",
         "recall", "fda", "cdc", "pandemic",
         "killed", "dead", "explosion",
