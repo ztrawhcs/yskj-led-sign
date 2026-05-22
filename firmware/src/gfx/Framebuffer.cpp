@@ -83,6 +83,47 @@ std::vector<uint8_t> Framebuffer::_buildBitmapPayload(
     return payload;
 }
 
+std::vector<uint8_t> Framebuffer::buildRegionClear(int x0, int y0, int x1, int y1) {
+    return _buildRegionClearPayload(x0, y0, x1, y1);
+}
+
+std::vector<uint8_t> Framebuffer::_buildRegionClearPayload(int x0, int y0, int x1, int y1) {
+    return {
+        0x32, 0x0D, 0x01,
+        0x00, 0x00, 0x00,
+        0x00,
+        (uint8_t)x0, 0x00,
+        (uint8_t)y0, 0x00,
+        (uint8_t)x1, 0x00,
+        (uint8_t)y1, 0x00
+    };
+}
+
+std::vector<uint8_t> Framebuffer::_buildRegionBitmapPayload(
+    const uint8_t* bitmap, size_t bitmapLen, RGB color,
+    int x0, int y0, int x1, int y1)
+{
+    std::vector<uint8_t> inner;
+    inner.reserve(12 + bitmapLen);
+    inner.push_back(0x00);
+    inner.push_back(color.r);
+    inner.push_back(color.g);
+    inner.push_back(color.b);
+    inner.push_back((uint8_t)x0); inner.push_back(0x00);
+    inner.push_back((uint8_t)y0); inner.push_back(0x00);
+    inner.push_back((uint8_t)x1); inner.push_back(0x00);
+    inner.push_back((uint8_t)y1); inner.push_back(0x00);
+    inner.insert(inner.end(), bitmap, bitmap + bitmapLen);
+
+    auto vl = AA55::varLen(inner.size());
+    std::vector<uint8_t> payload;
+    payload.reserve(1 + vl.size() + inner.size());
+    payload.push_back(0x32);
+    payload.insert(payload.end(), vl.begin(), vl.end());
+    payload.insert(payload.end(), inner.begin(), inner.end());
+    return payload;
+}
+
 // ---------------------------------------------------------------------------
 // Color collection and quantization helpers
 // ---------------------------------------------------------------------------
@@ -258,6 +299,99 @@ std::vector<std::vector<uint8_t>> Framebuffer::buildRtDrawPackets(int maxColors)
                                              payload.data(),
                                              payload.size(),
                                              0xC1, 2));
+    }
+
+    return packets;
+}
+
+// ---------------------------------------------------------------------------
+// buildRegionPackets — partial screen update
+// ---------------------------------------------------------------------------
+
+std::vector<std::vector<uint8_t>> Framebuffer::buildRegionPackets(
+    int rx0, int ry0, int rx1, int ry1, int maxColors)
+{
+    int rw = rx1 - rx0 + 1;
+    int rh = ry1 - ry0 + 1;
+    int rowBytes = (rw + 7) / 8;
+    int bitmapSize = rowBytes * rh;
+
+    static const int MAX_UNIQUE = 64;
+    ColorEntry entries[MAX_UNIQUE];
+    int numUnique = 0;
+
+    for (int y = ry0; y <= ry1; y++) {
+        for (int x = rx0; x <= rx1; x++) {
+            RGB c = _pixels[y * W + x];
+            if (c.isBlack()) continue;
+            uint32_t k = colorKey(c);
+            int idx = -1;
+            for (int j = 0; j < numUnique; j++) {
+                if (entries[j].key == k) { idx = j; break; }
+            }
+            if (idx >= 0) entries[idx].count++;
+            else if (numUnique < MAX_UNIQUE)
+                entries[numUnique++] = { k, 1 };
+        }
+    }
+
+    std::vector<std::vector<uint8_t>> packets;
+
+    if (numUnique == 0) {
+        auto p = _buildRegionClearPayload(rx0, ry0, rx1, ry1);
+        packets.push_back(AA55::buildPacket(AA55::nextSno(), p.data(), p.size(), 0xC1, 2));
+        return packets;
+    }
+
+    std::sort(entries, entries + numUnique,
+              [](const ColorEntry& a, const ColorEntry& b) { return a.count > b.count; });
+
+    int keepCount = min(numUnique, maxColors);
+    RGB keptColors[64];
+    for (int i = 0; i < keepCount; i++)
+        keptColors[i] = keyToColor(entries[i].key);
+
+    {
+        auto p = _buildRegionClearPayload(rx0, ry0, rx1, ry1);
+        packets.push_back(AA55::buildPacket(AA55::nextSno(), p.data(), p.size(), 0xC1, 2));
+    }
+
+    uint8_t bm[64 * 32];
+    memset(bm, 0, keepCount * bitmapSize);
+
+    for (int y = ry0; y <= ry1; y++) {
+        for (int x = rx0; x <= rx1; x++) {
+            RGB c = _pixels[y * W + x];
+            if (c.isBlack()) continue;
+            uint32_t k = colorKey(c);
+
+            int ci = -1;
+            for (int j = 0; j < keepCount; j++) {
+                if (entries[j].key == k) { ci = j; break; }
+            }
+            if (ci < 0) {
+                int bestIdx = 0, bestDist = colorDistSq(c, keptColors[0]);
+                for (int j = 1; j < keepCount; j++) {
+                    int d = colorDistSq(c, keptColors[j]);
+                    if (d < bestDist) { bestDist = d; bestIdx = j; }
+                }
+                ci = bestIdx;
+            }
+
+            int lx = x - rx0;
+            int ly = y - ry0;
+            int byteIdx = ly * rowBytes + lx / 8;
+            int bitIdx = 7 - (lx % 8);
+            bm[ci * bitmapSize + byteIdx] |= (1 << bitIdx);
+        }
+    }
+
+    for (int ci = 0; ci < keepCount; ci++) {
+        auto payload = _buildRegionBitmapPayload(
+            bm + ci * bitmapSize, bitmapSize, keptColors[ci],
+            rx0, ry0, rx1, ry1);
+        packets.push_back(AA55::buildPacket(AA55::nextSno(),
+            payload.data(), payload.size(), 0xC1, 2));
     }
 
     return packets;

@@ -42,7 +42,9 @@ public:
     int customIconSize() const { return _cIconSize; }
     int currentTemp() const { return _weather.temp; }
     const String& currentIcon() const { return _weather.icon; }
+    void setWeatherIcon(const String& icon) { _weather.icon = icon; _forceRedraw = true; _lastWeatherFetch = millis(); }
     void setTimeColor(uint8_t r, uint8_t g, uint8_t b);
+    void sendTestFrame(Framebuffer& fb);
     uint8_t timeColorR() const { return _cTimeColor.r; }
     uint8_t timeColorG() const { return _cTimeColor.g; }
     uint8_t timeColorB() const { return _cTimeColor.b; }
@@ -102,11 +104,15 @@ private:
     RGB _cTempColorOverride = {0, 0, 0}; // {0,0,0} = auto from temp value
 
     // Weather animation
-    static const int MAX_PARTICLES = 24;
-    struct Particle { float x, y, vy, vx; bool active; };
-    Particle _particles[MAX_PARTICLES] = {};
     unsigned long _lastAnimFrame = 0;
     bool _animActive = false;
+    int _animFrame = 0;
+    // Cached icon region for partial updates
+    int _iconRx0 = 0, _iconRy0 = 0, _iconRx1 = 0, _iconRy1 = 0;
+    bool _iconRegionValid = false;
+    // Previous frame for diff-based updates
+    Framebuffer _prevFrame;
+    bool _hasPrevFrame = false;
 
     // Timer / Stopwatch state
     TimerMode _timerMode = TIMER_NONE;
@@ -146,8 +152,6 @@ private:
 
     void saveSettings();
     void loadSettings();
-    void updateParticles();
-    void drawParticles(Framebuffer& fb);
 
     void fetchWeather();
     void fetchNews();
@@ -169,6 +173,7 @@ private:
     static const char* wmoToIcon(int code, bool isDay);
 
     void sendFrame(Framebuffer& fb, int maxColors = 12);
+    void sendRegion(Framebuffer& fb, int x0, int y0, int x1, int y1, int maxColors = 2);
 };
 
 extern ClockWeatherMode clockMode;

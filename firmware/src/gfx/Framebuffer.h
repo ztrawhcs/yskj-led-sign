@@ -26,13 +26,28 @@ public:
     /// bitmap layer per unique non-black color, sorted largest-layer-first.
     std::vector<std::vector<uint8_t>> buildRtDrawPackets(int maxColors = 12);
 
+    /// Build rt_draw packets for a sub-region only.
+    std::vector<std::vector<uint8_t>> buildRegionPackets(
+        int rx0, int ry0, int rx1, int ry1, int maxColors = 2);
+
+    /// Build a region-clear payload (black rect fill for sub-region).
+    static std::vector<uint8_t> buildRegionClear(int x0, int y0, int x1, int y1);
+
 private:
     RGB _pixels[W * H] = {};
 
     // Internal: build the rt_draw clear payload
     static std::vector<uint8_t> _buildClearPayload();
 
+    // Internal: build a region-clear payload
+    static std::vector<uint8_t> _buildRegionClearPayload(int x0, int y0, int x1, int y1);
+
     // Internal: build an rt_draw bitmap payload for one color layer
     static std::vector<uint8_t> _buildBitmapPayload(
         const uint8_t* bitmap, size_t bitmapLen, RGB color);
+
+    // Internal: build a region bitmap payload
+    static std::vector<uint8_t> _buildRegionBitmapPayload(
+        const uint8_t* bitmap, size_t bitmapLen, RGB color,
+        int x0, int y0, int x1, int y1);
 };

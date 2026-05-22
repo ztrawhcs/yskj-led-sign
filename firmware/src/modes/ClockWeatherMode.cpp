@@ -190,6 +190,7 @@ void ClockWeatherMode::setClockLayout(int layout) {
     if (layout > 3) layout = 3;
     _clockLayout = layout;
     _forceRedraw = true;
+    _iconRegionValid = false;
     saveSettings();
 }
 
@@ -333,14 +334,15 @@ void ClockWeatherMode::showNotification(const String& text, uint8_t r, uint8_t g
 // ---------------------------------------------------------------------------
 
 void ClockWeatherMode::loop() {
-    if (!_ble || !_ble->isReady()) return;
-
     unsigned long now = millis();
 
+    // Weather fetch doesn't need BLE — run it over WiFi regardless
     if (_lastWeatherFetch == 0 || now - _lastWeatherFetch > 120000) {
         fetchWeather();
         _lastWeatherFetch = now;
     }
+
+    if (!_ble || !_ble->isReady()) return;
 
     // News fetch every 15 minutes, only 7am-9pm
     struct tm newsTime;
@@ -368,15 +370,32 @@ void ClockWeatherMode::loop() {
         _lastProxyPoll = now;
     }
 
-    // Badge reminder: weekdays 7:30-8:30am, every 5 minutes
-    bool badgeTime = newsTime.tm_wday >= 1 && newsTime.tm_wday <= 5 &&
-        ((newsTime.tm_hour == 7 && newsTime.tm_min >= 30) ||
-         (newsTime.tm_hour == 8 && newsTime.tm_min < 30));
-    if (badgeTime) {
-        static unsigned long lastBadge = 0;
-        if (now - lastBadge > 300000 || lastBadge == 0) {
-            scrollHeadline("Don't Forget Your Badge!!!");
-            lastBadge = now;
+    // Badge reminder: weekdays 7:30-9:00am, every 2 minutes
+    if (newsHours) {
+        bool badgeTime = newsTime.tm_wday >= 1 && newsTime.tm_wday <= 5 &&
+            ((newsTime.tm_hour == 7 && newsTime.tm_min >= 30) ||
+             (newsTime.tm_hour == 8));
+        if (badgeTime) {
+            static unsigned long lastBadge = 0;
+            if (now - lastBadge > 120000 || lastBadge == 0) {
+                Serial.println("[Badge] Showing badge reminder via rt_draw");
+                static Framebuffer bfb;
+                bfb.clear();
+                RGB orange = {255, 140, 0};
+                const char* line1 = "Don't Forget";
+                const char* line2 = "Your Badge!!!";
+                int w1 = PixelFont::stringWidth(line1);
+                int w2 = PixelFont::stringWidth(line2);
+                PixelFont::drawString(bfb, line1, max(0, (Framebuffer::W - w1) / 2), 1, orange);
+                PixelFont::drawString(bfb, line2, max(0, (Framebuffer::W - w2) / 2), 9, orange);
+                sendFrame(bfb, 2);
+                delay(4000);
+                sendFrame(bfb, 2);
+                delay(4000);
+                _forceRedraw = true;
+                _hasPrevFrame = false;
+                lastBadge = millis();
+            }
         }
     }
 
@@ -390,8 +409,9 @@ void ClockWeatherMode::loop() {
         return;
     }
 
-    if (now - _lastWatchdog > 120000) {
+    if (now - _lastWatchdog > 600000) {
         _lastWatchdog = now;
+        _hasPrevFrame = false;
         _forceRedraw = true;
     }
 
@@ -431,6 +451,7 @@ void ClockWeatherMode::loop() {
         sendFrame(afb, 4);
         _alertUntil = now + 5000;
         _lastAlertShow = now;
+        _hasPrevFrame = false;
     }
     if (_alertUntil > 0 && now < _alertUntil) {
         static unsigned long lastAlertResend = 0;
@@ -459,28 +480,13 @@ void ClockWeatherMode::loop() {
     if (_weather.hourlyCount >= 24 && _lastForecastFlash > 0 &&
         now - _lastForecastFlash > 300000) {
         renderForecastFlash();
-        _lastForecastFlash = now;
-        _forceRedraw = true;
+        _lastForecastFlash = millis();
         return;
     }
     if (_lastForecastFlash == 0) _lastForecastFlash = now;
 
-    if (_forecastUntil > 0 && now < _forecastUntil) {
-        // Re-send forecast frame every 2s to keep it visible
-        static unsigned long lastForecastResend = 0;
-        if (now - lastForecastResend > 2000) {
-            static Framebuffer ffb;
-            ffb.clear();
-            drawForecastFullscreen(ffb);
-            sendFrame(ffb, 12);
-            lastForecastResend = now;
-        }
-        return;
-    }
-    _forecastUntil = 0;
-
-    _animActive = false;
-
+    // Enable weather animation for rain/snow/storm/fog
+    const char* ic = _weather.icon.c_str();
     struct tm timeinfo;
     if (!getLocalTime(&timeinfo)) return;
 
@@ -497,64 +503,105 @@ void ClockWeatherMode::loop() {
 // Weather fetch
 // ---------------------------------------------------------------------------
 
+static const char* owmToIcon(int id, const char* owmIcon) {
+    bool night = (owmIcon[2] == 'n');
+    if (id >= 200 && id < 300) return "storm";
+    if (id >= 300 && id < 400) return "rain";
+    if (id >= 500 && id < 600) return "rain";
+    if (id >= 600 && id < 700) return "snow";
+    if (id >= 700 && id < 800) return "fog";
+    if (id == 800) return night ? "moon" : "sun";
+    return "cloud";
+}
+
 void ClockWeatherMode::fetchWeather() {
-    HTTPClient http;
-    String url = "https://api.open-meteo.com/v1/forecast?"
-                 "latitude=" + String(WEATHER_LAT, 3) +
-                 "&longitude=" + String(WEATHER_LON, 3) +
-                 "&current=temperature_2m,weather_code,is_day"
-                 "&hourly=temperature_2m,uv_index"
-                 "&temperature_unit=fahrenheit"
-                 "&timezone=America%2FNew_York"
-                 "&forecast_days=1";
+    bool gotCurrent = false;
 
-    http.begin(url);
-    http.setTimeout(10000);
-    int code = http.GET();
-
-    Serial.printf("[Weather] HTTP code: %d\n", code);
-    if (code == 200) {
-        String payload = http.getString();
-        Serial.printf("[Weather] Response: %d bytes\n", payload.length());
-
-        JsonDocument doc;
-        DeserializationError err = deserializeJson(doc, payload);
-        if (err) {
-            Serial.printf("[Weather] JSON error: %s\n", err.c_str());
-            http.end();
-            return;
+    // Try OpenWeatherMap for current conditions (skip if key previously failed)
+    static bool owmKeyValid = true;
+    if (owmKeyValid) {
+        HTTPClient http;
+        String url = "https://api.openweathermap.org/data/2.5/weather?"
+                     "lat=" + String(WEATHER_LAT, 3) +
+                     "&lon=" + String(WEATHER_LON, 3) +
+                     "&appid=" OPENWEATHER_KEY
+                     "&units=imperial";
+        http.begin(url);
+        http.setTimeout(8000);
+        int code = http.GET();
+        Serial.printf("[Weather-OWM] HTTP %d\n", code);
+        if (code == 200) {
+            String payload = http.getString();
+            JsonDocument doc;
+            if (!deserializeJson(doc, payload)) {
+                _weather.temp = (int)doc["main"]["temp"].as<float>();
+                int wxId = doc["weather"][0]["id"] | 800;
+                const char* owmIcon = doc["weather"][0]["icon"] | "01d";
+                _weather.code = wxId;
+                _weather.isDay = (owmIcon[2] != 'n');
+                _weather.icon = owmToIcon(wxId, owmIcon);
+                gotCurrent = true;
+                Serial.printf("[Weather-OWM] %dF %s (id=%d)\n",
+                    _weather.temp, _weather.icon.c_str(), wxId);
+            }
+        } else if (code == 401) {
+            Serial.println("[Weather-OWM] Key invalid, disabling until reboot");
+            owmKeyValid = false;
         }
-
-        _weather.temp = (int)doc["current"]["temperature_2m"].as<float>();
-        _weather.code = doc["current"]["weather_code"] | 0;
-        _weather.isDay = doc["current"]["is_day"] | 1;
-        _weather.icon = wmoToIcon(_weather.code, _weather.isDay);
-
-        JsonArray temps = doc["hourly"]["temperature_2m"];
-        JsonArray uvs = doc["hourly"]["uv_index"];
-        _weather.hourlyCount = 0;
-        float hi = -999, lo = 999;
-        for (int i = 0; i < 24 && i < (int)temps.size(); i++) {
-            float t = temps[i].as<float>();
-            _weather.hourly[i] = t;
-            if (t > hi) hi = t;
-            if (t < lo) lo = t;
-            if (i < (int)uvs.size())
-                _weather.hourlyUV[i] = uvs[i].as<float>();
-            else
-                _weather.hourlyUV[i] = 0;
-            _weather.hourlyCount++;
-        }
-        _weather.tempHigh = hi;
-        _weather.tempLow = lo;
-
-        Serial.printf("[Weather] %dF %s (code %d, %s) H:%.0f L:%.0f\n",
-            _weather.temp, _weather.icon.c_str(), _weather.code,
-            _weather.isDay ? "day" : "night", hi, lo);
-    } else {
-        Serial.printf("[Weather] Fetch failed: %d\n", code);
+        http.end();
     }
-    http.end();
+
+    // Open-Meteo: hourly forecast + current conditions (primary if OWM disabled)
+    {
+        HTTPClient http;
+        String url = "https://api.open-meteo.com/v1/forecast?"
+                     "latitude=" + String(WEATHER_LAT, 3) +
+                     "&longitude=" + String(WEATHER_LON, 3) +
+                     "&hourly=temperature_2m,uv_index"
+                     "&current=temperature_2m,weather_code,is_day"
+                     "&temperature_unit=fahrenheit"
+                     "&timezone=America%2FNew_York"
+                     "&forecast_days=1";
+        http.begin(url);
+        http.setTimeout(10000);
+        int code = http.GET();
+        Serial.printf("[Weather-Meteo] HTTP %d\n", code);
+        if (code == 200) {
+            String payload = http.getString();
+            JsonDocument doc;
+            if (!deserializeJson(doc, payload)) {
+                if (!gotCurrent) {
+                    float t = doc["current"]["temperature_2m"] | 70.0f;
+                    _weather.temp = (int)t;
+                    int wmo = doc["current"]["weather_code"] | 0;
+                    _weather.isDay = doc["current"]["is_day"] | 1;
+                    _weather.icon = wmoToIcon(wmo, _weather.isDay);
+                    _weather.code = wmo;
+                    Serial.printf("[Weather-Meteo] %dF %s (wmo=%d)\n",
+                        _weather.temp, _weather.icon.c_str(), wmo);
+                }
+
+                JsonArray temps = doc["hourly"]["temperature_2m"];
+                JsonArray uvs = doc["hourly"]["uv_index"];
+                _weather.hourlyCount = 0;
+                float hi = -999, lo = 999;
+                for (int i = 0; i < 24 && i < (int)temps.size(); i++) {
+                    float t = temps[i].as<float>();
+                    _weather.hourly[i] = t;
+                    if (t > hi) hi = t;
+                    if (t < lo) lo = t;
+                    if (i < (int)uvs.size())
+                        _weather.hourlyUV[i] = uvs[i].as<float>();
+                    else
+                        _weather.hourlyUV[i] = 0;
+                    _weather.hourlyCount++;
+                }
+                _weather.tempHigh = hi;
+                _weather.tempLow = lo;
+            }
+        }
+        http.end();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,13 +622,47 @@ void ClockWeatherMode::renderClock() {
         for (auto& pkt : pkts) { _ble->send(pkt); delay(100); }
         delay(300);
         _clearTextOnNext = false;
+        _hasPrevFrame = false;
     }
 
     static Framebuffer fb;
     fb.clear();
     drawClockFace(fb);
-    if (_animActive) drawParticles(fb);
-    sendFrame(fb, 12);
+
+    if (_hasPrevFrame) {
+        // Find bounding box of changed pixels
+        int dx0 = Framebuffer::W, dy0 = Framebuffer::VISIBLE_H, dx1 = -1, dy1 = -1;
+        for (int y = 0; y < Framebuffer::VISIBLE_H; y++) {
+            for (int x = 0; x < Framebuffer::W; x++) {
+                if (fb.getPixel(x, y) != _prevFrame.getPixel(x, y)) {
+                    if (x < dx0) dx0 = x;
+                    if (x > dx1) dx1 = x;
+                    if (y < dy0) dy0 = y;
+                    if (y > dy1) dy1 = y;
+                }
+            }
+        }
+        if (dx1 >= 0) {
+            // Clear only the dirty region, then send full-screen bitmaps
+            auto clearPayload = Framebuffer::buildRegionClear(dx0, dy0, dx1, dy1);
+            auto clearPkt = AA55::buildPacket(AA55::nextSno(),
+                clearPayload.data(), clearPayload.size(), 0xC1, 2);
+            _ble->send(clearPkt);
+            delay(50);
+            // Send full-screen bitmap layers (proven format)
+            auto allPackets = fb.buildRtDrawPackets(12);
+            // Skip the first packet (full-screen clear) — we already cleared the dirty region
+            for (size_t i = 1; i < allPackets.size(); i++) {
+                _ble->send(allPackets[i]);
+                if (i < allPackets.size() - 1) delay(50);
+            }
+        }
+    } else {
+        sendFrame(fb, 12);
+    }
+
+    _prevFrame = fb;
+    _hasPrevFrame = true;
 
     struct tm ti;
     getLocalTime(&ti);
@@ -823,13 +904,19 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
 
         int ix = cx + gap;
         int iy = max(0, (VISIBLE_H - bigIconH) / 2);
-        WeatherIcons::draw(fb, _weather.icon.c_str(), ix, iy, iconClr);
+        WeatherIcons::drawFrame(fb, _weather.icon.c_str(), ix, iy, iconClr, _animFrame);
+        _iconRx0 = ix; _iconRy0 = iy;
+        _iconRx1 = ix + bigIconW - 1; _iconRy1 = iy + bigIconH - 1;
+        _iconRegionValid = true;
         drawTempStr(fb, tempFBuf, ix + bigIconW + 3, max(0, (VISIBLE_H - 7) / 2), tempClr);
 
     } else if (_clockLayout == 1) {
         int ty = max(0, (VISIBLE_H - digitH) / 2);
         int iy = max(0, (VISIBLE_H - ih7) / 2);
         drawIcon7(fb, _weather.icon.c_str(), 1, iy, iconClr);
+        _iconRx0 = 1; _iconRy0 = iy;
+        _iconRx1 = 1 + iw7 - 1; _iconRy1 = iy + ih7 - 1;
+        _iconRegionValid = true;
         int timeStart = max(0, (Framebuffer::W - timeW) / 2);
         drawTimeFn(timeStart, ty);
         drawTempStr(fb, tempFBuf, Framebuffer::W - tempW - 1,
@@ -853,6 +940,9 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
         drawTempStr(fb, tempFBuf, tempX, 0, tempClr);
         int iconX = weatherX + (weatherW - iw7) / 2;
         drawIcon7(fb, _weather.icon.c_str(), iconX, 9, iconClr);
+        _iconRx0 = iconX; _iconRy0 = 9;
+        _iconRx1 = iconX + iw7 - 1; _iconRy1 = 9 + ih7 - 1;
+        _iconRegionValid = true;
 
     } else {
         // Layout 3: Custom
@@ -901,85 +991,6 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
 // Weather particles
 // ---------------------------------------------------------------------------
 
-void ClockWeatherMode::updateParticles() {
-    const char* ic = _weather.icon.c_str();
-    bool isRain = (strcmp(ic,"rain")==0 || strcmp(ic,"storm")==0);
-    bool isSnow = strcmp(ic,"snow")==0;
-    bool isSun = strcmp(ic,"sun")==0;
-    bool isFog = strcmp(ic,"fog")==0;
-
-    for (int i = 0; i < MAX_PARTICLES; i++) {
-        if (!_particles[i].active) {
-            // Spawn new particle
-            _particles[i].active = true;
-            _particles[i].x = random(0, Framebuffer::W);
-            _particles[i].y = -1;
-            if (isRain) {
-                _particles[i].vy = 1.5f + random(0, 100) / 100.0f;
-                _particles[i].vx = -0.3f;
-            } else if (isSnow) {
-                _particles[i].vy = 0.5f + random(0, 50) / 100.0f;
-                _particles[i].vx = (random(0, 100) - 50) / 100.0f;
-            } else if (isSun) {
-                _particles[i].x = random(0, 10);
-                _particles[i].y = random(0, VISIBLE_H);
-                _particles[i].vx = 0.5f;
-                _particles[i].vy = 0.3f;
-            } else if (isFog) {
-                _particles[i].x = -1;
-                _particles[i].y = random(0, VISIBLE_H);
-                _particles[i].vx = 0.3f + random(0, 30) / 100.0f;
-                _particles[i].vy = 0;
-            }
-            break; // spawn one per frame
-        }
-
-        // Move existing particles
-        _particles[i].x += _particles[i].vx;
-        _particles[i].y += _particles[i].vy;
-
-        if (_particles[i].y >= VISIBLE_H || _particles[i].y < -2 ||
-            _particles[i].x >= Framebuffer::W || _particles[i].x < -2) {
-            _particles[i].active = false;
-        }
-    }
-}
-
-void ClockWeatherMode::drawParticles(Framebuffer& fb) {
-    const char* ic = _weather.icon.c_str();
-    bool isRain = (strcmp(ic,"rain")==0 || strcmp(ic,"storm")==0);
-    bool isSnow = strcmp(ic,"snow")==0;
-    bool isSun = strcmp(ic,"sun")==0;
-
-    for (int i = 0; i < MAX_PARTICLES; i++) {
-        if (!_particles[i].active) continue;
-        int px = (int)_particles[i].x;
-        int py = (int)_particles[i].y;
-        if (px < 0 || px >= Framebuffer::W || py < 0 || py >= VISIBLE_H) continue;
-
-        if (isRain) {
-            RGB c = {20, 40, 120};
-            fb.putPixel(px, py, c);
-            if (py + 1 < VISIBLE_H) fb.putPixel(px, py + 1, {10, 20, 60});
-        } else if (isSnow) {
-            fb.putPixel(px, py, {60, 60, 80});
-        } else if (isSun) {
-            fb.putPixel(px, py, {60, 50, 0});
-        } else {
-            // fog
-            fb.putPixel(px, py, {30, 30, 35});
-            if (px + 1 < Framebuffer::W) fb.putPixel(px + 1, py, {20, 20, 25});
-        }
-    }
-
-    // Storm: occasional lightning flash
-    if (strcmp(ic,"storm")==0 && random(0, 15) == 0) {
-        int lx = random(0, Framebuffer::W - 3);
-        RGB flash = {80, 80, 100};
-        for (int y = 0; y < VISIBLE_H; y++)
-            fb.putPixel(lx + random(0, 3), y, flash);
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Forecast flash
@@ -991,10 +1002,14 @@ void ClockWeatherMode::renderForecastFlash() {
     static Framebuffer fb;
     fb.clear();
     drawForecastFullscreen(fb);
-    sendFrame(fb, 12);
 
-    Serial.println("[Clock] Forecast flash (15s)");
-    _forecastUntil = millis() + FORECAST_FLASH_DURATION_MS;
+    Serial.println("[Clock] Forecast flash (10s hold)");
+    for (int i = 0; i < 5; i++) {
+        sendFrame(fb, 12);
+        delay(2000);
+    }
+    _forceRedraw = true;
+    _hasPrevFrame = false;
 }
 
 void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
@@ -1264,6 +1279,13 @@ static bool headlineMatches(const String& title) {
         "mass shooting", "shooter", "assassination", "assassinated",
         "bombing", "terrorist", "declare war", "invasion",
         "breaking:", "just in:", "urgent:",
+        "president", "congress", "senate", "white house",
+        "earthquake", "hurricane", "tornado", "wildfire",
+        "recall", "fda", "cdc", "pandemic",
+        "wall street", "dow", "stock market", "recession",
+        "election", "voter", "ballot",
+        "killed", "dead", "explosion", "crash",
+        "protest", "riot", "emergency",
         nullptr
     };
     for (int i = 0; keywords[i]; i++)
@@ -1272,8 +1294,9 @@ static bool headlineMatches(const String& title) {
 }
 
 static const char* NEWS_QUERIES[] = {
-    "supreme+court+OR+scotus+OR+DOJ+OR+indictment",
-    "breaking+news+shooting+OR+assassination+OR+bombing",
+    "breaking+news+today",
+    "supreme+court+OR+congress+OR+white+house",
+    "shooting+OR+earthquake+OR+hurricane+OR+explosion",
     nullptr
 };
 
@@ -1322,7 +1345,7 @@ void ClockWeatherMode::fetchNews() {
             }
         }
         http.end();
-        if (q + 1 < 3 && NEWS_QUERIES[q + 1]) delay(500);
+        if (NEWS_QUERIES[q + 1]) delay(500);
     }
     Serial.printf("[News] Total: %d matching headlines\n", _newsCount);
 }
@@ -1452,11 +1475,11 @@ void ClockWeatherMode::fetchWeatherAlerts() {
 // ---------------------------------------------------------------------------
 
 void ClockWeatherMode::scrollHeadline(const String& text) {
-    int scrollTime = max((int)(text.length() * 0.35f), 8);
+    int scrollTime = max((int)(text.length() * 0.28f), 6);
 
     TextProgramConfig cfg;
     cfg.scroll = "left";
-    cfg.speed = 8;
+    cfg.speed = 10;
     cfg.fontSize = 14;
     cfg.fontFamily = 0x00;
     cfg.duration = scrollTime;
@@ -1481,6 +1504,7 @@ void ClockWeatherMode::scrollHeadline(const String& text) {
     for (auto& pkt : blankPkts) { _ble->send(pkt); delay(150); }
     delay(300);
     _forceRedraw = true;
+    _hasPrevFrame = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1513,20 @@ void ClockWeatherMode::scrollHeadline(const String& text) {
 
 void ClockWeatherMode::sendFrame(Framebuffer& fb, int maxColors) {
     auto packets = fb.buildRtDrawPackets(maxColors);
+    for (size_t i = 0; i < packets.size(); i++) {
+        _ble->send(packets[i]);
+        if (i < packets.size() - 1) delay(50);
+    }
+}
+
+void ClockWeatherMode::sendTestFrame(Framebuffer& fb) {
+    sendFrame(fb, 2);
+    _forceRedraw = true;
+    _hasPrevFrame = false;
+}
+
+void ClockWeatherMode::sendRegion(Framebuffer& fb, int x0, int y0, int x1, int y1, int maxColors) {
+    auto packets = fb.buildRegionPackets(x0, y0, x1, y1, maxColors);
     for (size_t i = 0; i < packets.size(); i++) {
         _ble->send(packets[i]);
         if (i < packets.size() - 1) delay(50);

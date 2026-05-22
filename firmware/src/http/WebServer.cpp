@@ -4,6 +4,7 @@
 #include "../protocol/TextProgram.h"
 #include "../protocol/AA55Packet.h"
 #include "../modes/ClockWeatherMode.h"
+#include "../gfx/PixelFont.h"
 #include <ArduinoJson.h>
 
 SignWebServer webServer;
@@ -139,6 +140,18 @@ button.send:hover{background:#4a9aff}
 <button class="send" style="flex:1" id="timer-pause-btn" onclick="togglePause()">Pause</button>
 <button class="send" style="flex:1;background:#c0392b" onclick="resetTimer()">Reset</button>
 </div></div></div>
+<div class="card"><h2>Weather Test</h2>
+<div class="row" style="gap:6px;flex-wrap:wrap">
+<button class="send" style="flex:1;min-width:60px" onclick="setWx('sun')">Sun</button>
+<button class="send" style="flex:1;min-width:60px" onclick="setWx('moon')">Moon</button>
+<button class="send" style="flex:1;min-width:60px" onclick="setWx('cloud')">Cloud</button>
+<button class="send" style="flex:1;min-width:60px;background:#1a5276" onclick="setWx('rain')">Rain</button>
+<button class="send" style="flex:1;min-width:60px;background:#1a5276" onclick="setWx('snow')">Snow</button>
+<button class="send" style="flex:1;min-width:60px;background:#6c3483" onclick="setWx('storm')">Storm</button>
+<button class="send" style="flex:1;min-width:60px;background:#566573" onclick="setWx('fog')">Fog</button>
+</div>
+<div style="margin-top:6px;font-size:.75em;color:#666">Overrides for 2 min, then real weather resumes</div>
+</div>
 <div class="card"><h2>News Headlines</h2>
 <div class="row">
 <div class="field" style="flex:1"><label>RSS Feed URL</label><input type="text" id="rss-url" placeholder="https://feeds.example.com/rss"></div>
@@ -400,6 +413,7 @@ function fmtTime(s){
 }
 
 // News controls
+function setWx(icon){fetch('/api/weather?icon='+icon);}
 function saveRss(){fetch('/api/news?rss_url='+encodeURIComponent(document.getElementById('rss-url').value));}
 function fetchNews(){fetch('/api/news?fetch=1');}
 
@@ -793,6 +807,49 @@ poll();
         String out;
         serializeJson(resp, out);
         req->send(200, "application/json", out);
+    });
+
+    // ---------------------------------------------------------------
+    // GET /api/weather?icon=rain — Override weather icon for testing
+    // ---------------------------------------------------------------
+    _server.on("/api/weather", HTTP_GET, [this](AsyncWebServerRequest* req) {
+        _requestCount++;
+        if (req->hasArg("icon")) {
+            String icon = req->arg("icon");
+            clockMode.setWeatherIcon(icon);
+            Serial.printf("[HTTP] Weather icon override: %s\n", icon.c_str());
+            JsonDocument resp;
+            resp["ok"] = true;
+            resp["icon"] = icon;
+            String out;
+            serializeJson(resp, out);
+            req->send(200, "application/json", out);
+            return;
+        }
+        JsonDocument resp;
+        resp["temp"] = clockMode.currentTemp();
+        resp["icon"] = clockMode.currentIcon();
+        String out;
+        serializeJson(resp, out);
+        req->send(200, "application/json", out);
+    });
+
+    // ---------------------------------------------------------------
+    // GET /api/badge — Test badge reminder
+    // ---------------------------------------------------------------
+    _server.on("/api/badge", HTTP_GET, [this](AsyncWebServerRequest* req) {
+        _requestCount++;
+        req->send(200, "application/json", "{\"ok\":true,\"action\":\"badge\"}");
+        static Framebuffer bfb;
+        bfb.clear();
+        RGB orange = {255, 140, 0};
+        const char* line1 = "Don't Forget";
+        const char* line2 = "Your Badge!!!";
+        int w1 = PixelFont::stringWidth(line1);
+        int w2 = PixelFont::stringWidth(line2);
+        PixelFont::drawString(bfb, line1, max(0, (Framebuffer::W - w1) / 2), 1, orange);
+        PixelFont::drawString(bfb, line2, max(0, (Framebuffer::W - w2) / 2), 9, orange);
+        clockMode.sendTestFrame(bfb);
     });
 
     // ---------------------------------------------------------------

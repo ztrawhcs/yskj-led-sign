@@ -56,40 +56,56 @@ static const Glyph GLYPH_PERIOD = { { 0b0, 0b0, 0b0, 0b0, 0b1 }, 1 };
 // Degree: 3px wide, small circle at top
 static const Glyph GLYPH_DEGREE = { { 0b010, 0b101, 0b010, 0b000, 0b000 }, 3 };
 
-// Letter U: # #  # #  # #  # #  ###
-static const Glyph GLYPH_U = { { 0b101, 0b101, 0b101, 0b101, 0b111 }, 3 };
-
-// Letter V: # #  # #  # #   #    #
-static const Glyph GLYPH_V = { { 0b101, 0b101, 0b101, 0b010, 0b010 }, 3 };
-
-// Letter F: ###  #    ##   #    #
-static const Glyph GLYPH_F = { { 0b111, 0b100, 0b110, 0b100, 0b100 }, 3 };
-
-// Letter A: ###  # #  ###  # #  # #
 static const Glyph GLYPH_A = { { 0b111, 0b101, 0b111, 0b101, 0b101 }, 3 };
-
-// Letter P: ###  # #  ###  #    #
-static const Glyph GLYPH_P = { { 0b111, 0b101, 0b111, 0b100, 0b100 }, 3 };
-
-// Letter M: 5px wide
+static const Glyph GLYPH_B = { { 0b110, 0b101, 0b110, 0b101, 0b110 }, 3 };
+static const Glyph GLYPH_C = { { 0b111, 0b100, 0b100, 0b100, 0b111 }, 3 };
+static const Glyph GLYPH_D = { { 0b110, 0b101, 0b101, 0b101, 0b110 }, 3 };
+static const Glyph GLYPH_E = { { 0b111, 0b100, 0b110, 0b100, 0b111 }, 3 };
+static const Glyph GLYPH_F = { { 0b111, 0b100, 0b110, 0b100, 0b100 }, 3 };
+static const Glyph GLYPH_G = { { 0b111, 0b100, 0b101, 0b101, 0b111 }, 3 };
+static const Glyph GLYPH_H = { { 0b101, 0b101, 0b111, 0b101, 0b101 }, 3 };
+static const Glyph GLYPH_I = { { 0b111, 0b010, 0b010, 0b010, 0b111 }, 3 };
+static const Glyph GLYPH_J = { { 0b001, 0b001, 0b001, 0b101, 0b111 }, 3 };
+static const Glyph GLYPH_K = { { 0b101, 0b110, 0b100, 0b110, 0b101 }, 3 };
+static const Glyph GLYPH_L = { { 0b100, 0b100, 0b100, 0b100, 0b111 }, 3 };
 static const Glyph GLYPH_M = { { 0b10001, 0b11011, 0b10101, 0b10001, 0b10001 }, 5 };
+static const Glyph GLYPH_N = { { 0b1001, 0b1101, 0b1011, 0b1001, 0b1001 }, 4 };
+static const Glyph GLYPH_O = { { 0b111, 0b101, 0b101, 0b101, 0b111 }, 3 };
+static const Glyph GLYPH_P = { { 0b111, 0b101, 0b111, 0b100, 0b100 }, 3 };
+static const Glyph GLYPH_Q = { { 0b111, 0b101, 0b101, 0b111, 0b001 }, 3 };
+static const Glyph GLYPH_R = { { 0b111, 0b101, 0b111, 0b110, 0b101 }, 3 };
+static const Glyph GLYPH_S = { { 0b111, 0b100, 0b111, 0b001, 0b111 }, 3 };
+static const Glyph GLYPH_T = { { 0b111, 0b010, 0b010, 0b010, 0b010 }, 3 };
+static const Glyph GLYPH_U = { { 0b101, 0b101, 0b101, 0b101, 0b111 }, 3 };
+static const Glyph GLYPH_V = { { 0b101, 0b101, 0b101, 0b010, 0b010 }, 3 };
+static const Glyph GLYPH_W = { { 0b10001, 0b10001, 0b10101, 0b11011, 0b10001 }, 5 };
+static const Glyph GLYPH_X = { { 0b101, 0b101, 0b010, 0b101, 0b101 }, 3 };
+static const Glyph GLYPH_Y = { { 0b101, 0b101, 0b010, 0b010, 0b010 }, 3 };
+static const Glyph GLYPH_Z = { { 0b111, 0b001, 0b010, 0b100, 0b111 }, 3 };
+static const Glyph GLYPH_EXCL = { { 0b1, 0b1, 0b1, 0b0, 0b1 }, 1 };
+static const Glyph GLYPH_APOS = { { 0b1, 0b1, 0b0, 0b0, 0b0 }, 1 };
 // clang-format on
+
+static const Glyph* ALPHA_TABLE[] = {
+    &GLYPH_A, &GLYPH_B, &GLYPH_C, &GLYPH_D, &GLYPH_E, &GLYPH_F,
+    &GLYPH_G, &GLYPH_H, &GLYPH_I, &GLYPH_J, &GLYPH_K, &GLYPH_L,
+    &GLYPH_M, &GLYPH_N, &GLYPH_O, &GLYPH_P, &GLYPH_Q, &GLYPH_R,
+    &GLYPH_S, &GLYPH_T, &GLYPH_U, &GLYPH_V, &GLYPH_W, &GLYPH_X,
+    &GLYPH_Y, &GLYPH_Z,
+};
 
 static const Glyph* getGlyph(char ch) {
     if (ch >= '0' && ch <= '9') return &GLYPHS[ch - '0'];
+    if (ch >= 'A' && ch <= 'Z') return ALPHA_TABLE[ch - 'A'];
+    if (ch >= 'a' && ch <= 'z') return ALPHA_TABLE[ch - 'a'];
     if (ch == ':')  return &GLYPH_COLON;
     if (ch == ' ')  return &GLYPH_SPACE;
     if (ch == '-')  return &GLYPH_DASH;
     if (ch == '.')  return &GLYPH_PERIOD;
-    if (ch == 'U' || ch == 'u') return &GLYPH_U;
-    if (ch == 'V' || ch == 'v') return &GLYPH_V;
-    if (ch == 'F' || ch == 'f') return &GLYPH_F;
-    if (ch == 'A' || ch == 'a') return &GLYPH_A;
-    if (ch == 'P' || ch == 'p') return &GLYPH_P;
-    if (ch == 'M' || ch == 'm') return &GLYPH_M;
-    // Degree sign: accept ASCII 0xB0 (°) or '*' as alias
+    if (ch == '!')  return &GLYPH_EXCL;
+    if (ch == '\'') return &GLYPH_APOS;
     if ((uint8_t)ch == 0xB0 || ch == '*') return &GLYPH_DEGREE;
-    return nullptr;  // unsupported character — skip
+    return &GLYPH_SPACE;
 }
 
 // ---------------------------------------------------------------------------
