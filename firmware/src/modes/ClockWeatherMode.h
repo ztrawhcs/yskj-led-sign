@@ -8,11 +8,14 @@
 
 struct WeatherData {
     int temp = 70;
+    int humidity = 0;
+    float uvIndex = 0;
     String icon = "cloud";
     int code = 0;
     bool isDay = true;
     float hourly[24] = {};
     float hourlyUV[24] = {};
+    int hourlyWMO[24] = {};
     int hourlyCount = 0;
     float tempHigh = 0;
     float tempLow = 0;
@@ -41,6 +44,8 @@ public:
     int customIconY() const { return _cIconY; }
     int customIconSize() const { return _cIconSize; }
     int currentTemp() const { return _weather.temp; }
+    int currentHumidity() const { return _weather.humidity; }
+    float currentUV() const { return _weather.uvIndex; }
     const String& currentIcon() const { return _weather.icon; }
     void setWeatherIcon(const String& icon) { _weather.icon = icon; _forceRedraw = true; _lastWeatherFetch = millis(); }
     void setTimeColor(uint8_t r, uint8_t g, uint8_t b);
@@ -114,6 +119,12 @@ private:
     Framebuffer _prevFrame;
     bool _hasPrevFrame = false;
 
+    // GIF animation mode
+    enum DisplayMode { DISPLAY_RT_DRAW = 0, DISPLAY_GIF_PROGRAM = 1 };
+    DisplayMode _displayMode = DISPLAY_RT_DRAW;
+    int _gifFailCount = 0;
+    static const int MAX_GIF_FAILS = 3;
+
     // Timer / Stopwatch state
     TimerMode _timerMode = TIMER_NONE;
     unsigned long _timerStartMs = 0;
@@ -167,6 +178,8 @@ private:
     void drawClockFace(Framebuffer& fb);
     void drawForecastFullscreen(Framebuffer& fb);
     void drawTimerFace(Framebuffer& fb);
+    bool generateAndUploadGif();
+    void buildAnimPalette(RGB* palette, int* numColors);
 
     static RGB tempColor(int tempF);
     static const char* iconColor(const char* icon, uint8_t& r, uint8_t& g, uint8_t& b);

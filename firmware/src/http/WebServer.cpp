@@ -470,6 +470,8 @@ poll();
         doc["wifi_rssi"] = WiFi.RSSI();
         doc["clock_layout"] = clockMode.getClockLayout();
         doc["temp"] = clockMode.currentTemp();
+        doc["humidity"] = clockMode.currentHumidity();
+        doc["uv_index"] = clockMode.currentUV();
         doc["weather_icon"] = clockMode.currentIcon();
         doc["ct_x"] = clockMode.customTimeX();
         doc["ct_y"] = clockMode.customTimeY();
