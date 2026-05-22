@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LED Sign Control</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        h1 {
+            text-align: center;
+            font-size: 1.4em;
+            margin-bottom: 20px;
+            color: #3282ff;
+        }
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-bottom: 24px;
+            font-size: 0.85em;
+            color: #888;
+        }
+        .status-bar .dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+        .dot.green { background: #0f0; }
+        .dot.red { background: #f00; }
+        .dot.yellow { background: #ff0; }
+
+        /* Mode grid */
+        .modes {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 10px;
+            margin-bottom: 24px;
+        }
+        .mode-btn {
+            background: #1a1a1a;
+            border: 2px solid #333;
+            border-radius: 12px;
+            padding: 16px 8px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-size: 0.9em;
+            color: #ccc;
+        }
+        .mode-btn:hover { border-color: #555; background: #222; }
+        .mode-btn.active { border-color: #3282ff; background: #1a2a44; color: #fff; }
+        .mode-btn .icon { font-size: 1.8em; display: block; margin-bottom: 6px; }
+
+        /* Settings panels */
+        .panel {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            display: none;
+        }
+        .panel.visible { display: block; }
+        .panel h3 {
+            font-size: 1em;
+            margin-bottom: 12px;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-weight: 500;
+        }
+
+        /* Form controls */
+        .field { margin-bottom: 14px; }
+        .field label {
+            display: block;
+            font-size: 0.8em;
+            color: #888;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        input[type="text"], textarea {
+            width: 100%;
+            background: #0a0a0a;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 10px 12px;
+            color: #fff;
+            font-size: 1em;
+        }
+        input[type="text"]:focus, textarea:focus {
+            outline: none;
+            border-color: #3282ff;
+        }
+        input[type="color"] {
+            width: 40px; height: 34px;
+            border: 1px solid #444;
+            border-radius: 6px;
+            background: none;
+            cursor: pointer;
+        }
+        input[type="range"] {
+            width: 100%;
+            accent-color: #3282ff;
+        }
+        select {
+            background: #0a0a0a;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 8px 12px;
+            color: #fff;
+            font-size: 0.9em;
+        }
+
+        /* Buttons */
+        .btn {
+            background: #3282ff;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 20px;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .btn:hover { background: #4a94ff; }
+        .btn.secondary { background: #333; }
+        .btn.secondary:hover { background: #444; }
+        .btn.danger { background: #cc3333; }
+        .btn.danger:hover { background: #dd4444; }
+
+        .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+        /* Brightness slider */
+        .brightness-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 24px;
+            padding: 12px 16px;
+            background: #1a1a1a;
+            border-radius: 12px;
+            border: 1px solid #333;
+        }
+        .brightness-row label { color: #888; font-size: 0.8em; text-transform: uppercase; white-space: nowrap; }
+        .brightness-row input[type="range"] { flex: 1; }
+        .brightness-row .val { color: #fff; min-width: 24px; text-align: center; }
+
+        /* Quick actions */
+        .quick-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            margin-bottom: 24px;
+        }
+
+        /* Inline color+text */
+        .color-text-row {
+            display: flex;
+            gap: 8px;
+            align-items: flex-end;
+        }
+        .color-text-row .field:first-child { flex: 0 0 auto; }
+        .color-text-row .field:last-child { flex: 1; }
+
+        /* Forecast style toggle */
+        .toggle-group {
+            display: flex;
+            gap: 4px;
+            background: #0a0a0a;
+            border-radius: 8px;
+            padding: 3px;
+        }
+        .toggle-group button {
+            background: none;
+            border: none;
+            color: #888;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .toggle-group button.active {
+            background: #3282ff;
+            color: #fff;
+        }
+
+        /* Headlines list */
+        .headline-list {
+            list-style: none;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 0.85em;
+        }
+        .headline-list li {
+            padding: 6px 0;
+            border-bottom: 1px solid #222;
+            cursor: pointer;
+        }
+        .headline-list li:hover { color: #3282ff; }
+        .headline-list li.court { color: #ff8800; }
+    </style>
+</head>
+<body>
+    <h1>LED Sign</h1>
+
+    <div class="status-bar">
+        <span><span class="dot" id="bridgeDot"></span> Bridge: <span id="bridgeState">...</span></span>
+        <span>Mode: <strong id="currentMode">...</strong></span>
+    </div>
+
+    <div class="brightness-row">
+        <label>Brightness</label>
+        <input type="range" min="0" max="15" value="10" id="brightness">
+        <span class="val" id="brightnessVal">10</span>
+    </div>
+
+    <div class="modes">
+        <div class="mode-btn" data-mode="clock" id="modeClockBtn">
+            <span class="icon">🕐</span> Clock
+        </div>
+        <div class="mode-btn" data-mode="text" id="modeTextBtn">
+            <span class="icon">✏️</span> Text
+        </div>
+        <div class="mode-btn" data-mode="headlines" id="modeHeadlinesBtn">
+            <span class="icon">📰</span> Headlines
+        </div>
+        <div class="mode-btn" data-mode="dadjoke" id="modeDadjokeBtn">
+            <span class="icon">😄</span> Dad Jokes
+        </div>
+        <div class="mode-btn" data-mode="message" id="modeMessageBtn">
+            <span class="icon">💬</span> Message
+        </div>
+        <div class="mode-btn" data-mode="off" id="modeOffBtn">
+            <span class="icon">⏻</span> Off
+        </div>
+    </div>
+
+    <!-- Clock settings -->
+    <div class="panel" id="panelClock">
+        <h3>Clock Settings</h3>
+        <div class="field">
+            <label>Forecast Style</label>
+            <div class="toggle-group">
+                <button data-forecast="none" class="active">Full</button>
+                <button data-forecast="strip">Strip</button>
+                <button data-forecast="sparkline">Sparkline</button>
+            </div>
+        </div>
+        <div class="btn-row" style="margin-top: 12px">
+            <button class="btn secondary" id="showForecastBtn">Show Forecast Now</button>
+        </div>
+    </div>
+
+    <!-- Custom text settings -->
+    <div class="panel" id="panelText">
+        <h3>Custom Text</h3>
+        <div class="color-text-row">
+            <div class="field">
+                <label>Color</label>
+                <input type="color" value="#3282ff" id="textColor">
+            </div>
+            <div class="field">
+                <label>Text</label>
+                <input type="text" id="textInput" placeholder="Hello world!">
+            </div>
+        </div>
+        <div style="display: flex; gap: 12px; margin-top: 10px">
+            <div class="field" style="flex:1">
+                <label>Scroll</label>
+                <select id="textScroll">
+                    <option value="left">Left</option>
+                    <option value="right">Right</option>
+                    <option value="up">Up</option>
+                    <option value="down">Down</option>
+                    <option value="static">Static</option>
+                </select>
+            </div>
+            <div class="field" style="flex:1">
+                <label>Speed</label>
+                <input type="range" min="1" max="20" value="10" id="textSpeed">
+            </div>
+        </div>
+        <button class="btn" id="sendTextBtn" style="margin-top: 8px">Send</button>
+    </div>
+
+    <!-- Headlines panel -->
+    <div class="panel" id="panelHeadlines">
+        <h3>Breaking News Alerts</h3>
+        <p style="font-size: 0.8em; color: #666; margin-bottom: 8px">Filtered for: SCOTUS, legal, emergencies, major events. No sports. Click to send one.</p>
+        <ul class="headline-list" id="headlineList">
+            <li>Checking for alerts...</li>
+        </ul>
+    </div>
+
+    <!-- Dad joke panel -->
+    <div class="panel" id="panelDadjoke">
+        <h3>Dad Jokes</h3>
+        <p id="currentJoke" style="font-style: italic; margin-bottom: 12px">Loading...</p>
+        <button class="btn secondary" id="newJokeBtn">New Joke</button>
+    </div>
+
+    <!-- Message panel -->
+    <div class="panel" id="panelMessage">
+        <h3>Custom Message</h3>
+        <p style="font-size: 0.8em; color: #666; margin-bottom: 8px">Static message — stays until you change it.</p>
+        <div class="color-text-row">
+            <div class="field">
+                <label>Color</label>
+                <input type="color" value="#ffffff" id="msgColor">
+            </div>
+            <div class="field">
+                <label>Message</label>
+                <input type="text" id="msgInput" placeholder="HAPPY BIRTHDAY">
+            </div>
+        </div>
+        <button class="btn" id="sendMsgBtn" style="margin-top: 8px">Send</button>
+    </div>
+
+    <!-- Quick actions -->
+    <div class="quick-actions">
+        <button class="btn secondary" id="clearBtn">Clear</button>
+        <button class="btn secondary" id="powerOnBtn">Power On</button>
+        <button class="btn danger" id="powerOffBtn">Power Off</button>
+    </div>
+
+    <script>
+    const API = '';
+
+    async function api(path, opts = {}) {
+        const resp = await fetch(API + path, {
+            method: opts.method || 'GET',
+            headers: opts.body ? {'Content-Type': 'application/json'} : {},
+            body: opts.body ? JSON.stringify(opts.body) : undefined
+        });
+        return resp.json();
+    }
+
+    // Status polling
+    async function refreshStatus() {
+        try {
+            const s = await api('/api/status');
+            document.getElementById('currentMode').textContent = s.mode;
+            const bridgeState = s.bridge?.state || 'unknown';
+            document.getElementById('bridgeState').textContent = bridgeState;
+            const dot = document.getElementById('bridgeDot');
+            dot.className = 'dot ' + (bridgeState === 'Ready' ? 'green' : bridgeState === 'Scanning' ? 'yellow' : 'red');
+
+            // Update active mode button
+            document.querySelectorAll('.mode-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.mode === s.mode);
+            });
+        } catch(e) {}
+    }
+    setInterval(refreshStatus, 3000);
+    refreshStatus();
+
+    // Mode buttons
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const mode = btn.dataset.mode;
+
+            // Hide all panels
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('visible'));
+
+            if (mode === 'clock') {
+                document.getElementById('panelClock').classList.add('visible');
+                await api('/api/mode', {method: 'POST', body: {mode: 'clock'}});
+            } else if (mode === 'text') {
+                document.getElementById('panelText').classList.add('visible');
+                // Don't send yet — let user type
+            } else if (mode === 'headlines') {
+                document.getElementById('panelHeadlines').classList.add('visible');
+                await api('/api/mode', {method: 'POST', body: {mode: 'headlines'}});
+                loadHeadlines();
+            } else if (mode === 'dadjoke') {
+                document.getElementById('panelDadjoke').classList.add('visible');
+                await api('/api/mode', {method: 'POST', body: {mode: 'dadjoke'}});
+                loadJoke();
+            } else if (mode === 'message') {
+                document.getElementById('panelMessage').classList.add('visible');
+            } else if (mode === 'off') {
+                await api('/api/mode', {method: 'POST', body: {mode: 'off'}});
+            }
+
+            refreshStatus();
+        });
+    });
+
+    // Brightness
+    const brightnessSlider = document.getElementById('brightness');
+    const brightnessVal = document.getElementById('brightnessVal');
+    let brightnessTimeout;
+    brightnessSlider.addEventListener('input', () => {
+        brightnessVal.textContent = brightnessSlider.value;
+        clearTimeout(brightnessTimeout);
+        brightnessTimeout = setTimeout(() => {
+            api('/api/brightness', {method: 'POST', body: {level: parseInt(brightnessSlider.value)}});
+        }, 200);
+    });
+
+    // Clock forecast toggle
+    document.querySelectorAll('.toggle-group button').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            document.querySelectorAll('.toggle-group button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            await api('/api/mode', {method: 'POST', body: {mode: 'clock', forecast: btn.dataset.forecast}});
+        });
+    });
+
+    // Show forecast
+    document.getElementById('showForecastBtn').addEventListener('click', () => {
+        api('/api/forecast', {method: 'POST'});
+    });
+
+    // Send text
+    document.getElementById('sendTextBtn').addEventListener('click', async () => {
+        const text = document.getElementById('textInput').value;
+        if (!text) return;
+        await api('/api/mode', {method: 'POST', body: {
+            mode: 'text',
+            text,
+            color: document.getElementById('textColor').value,
+            scroll: document.getElementById('textScroll').value,
+            speed: parseInt(document.getElementById('textSpeed').value)
+        }});
+        refreshStatus();
+    });
+
+    // Also send on Enter
+    document.getElementById('textInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') document.getElementById('sendTextBtn').click();
+    });
+
+    // Send message
+    document.getElementById('sendMsgBtn').addEventListener('click', async () => {
+        const text = document.getElementById('msgInput').value;
+        if (!text) return;
+        await api('/api/mode', {method: 'POST', body: {
+            mode: 'message',
+            text,
+            color: document.getElementById('msgColor').value
+        }});
+        refreshStatus();
+    });
+    document.getElementById('msgInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') document.getElementById('sendMsgBtn').click();
+    });
+
+    // Headlines
+    async function loadHeadlines() {
+        const data = await api('/api/headlines');
+        const list = document.getElementById('headlineList');
+        list.innerHTML = '';
+        if (!data.headlines || data.headlines.length === 0) {
+            const li = document.createElement('li');
+            li.textContent = 'No breaking news matching filters right now.';
+            li.style.color = '#555';
+            list.appendChild(li);
+            return;
+        }
+        (data.headlines || []).forEach(h => {
+            const li = document.createElement('li');
+            li.textContent = h;
+            li.onclick = () => api('/api/mode', {method: 'POST', body: {mode: 'text', text: h, color: '#ff6400', scroll: 'left', speed: 8}});
+            list.appendChild(li);
+        });
+    }
+
+    // Dad jokes
+    async function loadJoke() {
+        const data = await api('/api/dadjoke');
+        document.getElementById('currentJoke').textContent = data.joke;
+    }
+    document.getElementById('newJokeBtn').addEventListener('click', loadJoke);
+
+    // Quick actions
+    document.getElementById('clearBtn').addEventListener('click', () => api('/api/power', {method: 'POST', body: {action: 'on'}}));
+    document.getElementById('powerOnBtn').addEventListener('click', () => api('/api/power', {method: 'POST', body: {action: 'on'}}));
+    document.getElementById('powerOffBtn').addEventListener('click', () => api('/api/power', {method: 'POST', body: {action: 'off'}}));
+    </script>
+</body>
+</html>

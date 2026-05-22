@@ -81,22 +81,46 @@ class BLEManager: NSObject, ObservableObject {
         statusMessage = "Disconnected"
     }
 
+    private let bleWriteChunkSize = 180
+
     func send(_ data: Data, responseHandler: ((Data) -> Void)? = nil) {
         guard let writeChar, let peripheral, state == .ready else {
             addDiag("Cannot send: not ready (state=\(self.state.rawValue))")
             return
         }
         self.responseHandler = responseHandler
-        let hex = data.map { String(format: "%02x", $0) }.joined()
-        let maxWnR = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        addDiag("WRITE [\(data.count)B] maxWnR=\(maxWnR): \(hex)")
+        let hex = data.prefix(40).map { String(format: "%02x", $0) }.joined()
+        addDiag("WRITE [\(data.count)B]: \(hex)\(data.count > 40 ? "..." : "")")
 
-        if data.count > maxWnR {
-            addDiag("WARNING: Packet \(data.count)B exceeds WnR MTU \(maxWnR)B!")
+        if data.count <= bleWriteChunkSize {
+            peripheral.writeValue(data, for: writeChar, type: .withoutResponse)
+            commandCount += 1
+        } else {
+            addDiag("Chunking \(data.count)B into \(bleWriteChunkSize)B pieces")
+            Task {
+                await sendChunked(data)
+                await MainActor.run { self.commandCount += 1 }
+            }
         }
+    }
 
-        peripheral.writeValue(data, for: writeChar, type: .withoutResponse)
-        commandCount += 1
+    private func sendChunked(_ data: Data) async {
+        guard let writeChar, let peripheral else { return }
+        var offset = 0
+        var chunkNum = 0
+        while offset < data.count {
+            let end = min(offset + bleWriteChunkSize, data.count)
+            let chunk = data[offset..<end]
+
+            while !peripheral.canSendWriteWithoutResponse {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+
+            peripheral.writeValue(chunk, for: writeChar, type: .withoutResponse)
+            chunkNum += 1
+            offset = end
+        }
+        addDiag("Sent \(chunkNum) chunks for \(data.count)B packet")
     }
 
     func sendAsync(_ data: Data) async {

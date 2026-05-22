@@ -54,7 +54,7 @@ class HTTPServer: ObservableObject {
 
     private func handleConnection(_ conn: NWConnection) {
         conn.start(queue: .main)
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, error in
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, error in
             guard let self, let data, error == nil else {
                 conn.cancel()
                 return
@@ -170,6 +170,36 @@ class HTTPServer: ObservableObject {
                 respond(conn, status: 400, body: ["error": "Usage: POST /raw/{hex} e.g. /raw/aa55ffff..."])
             }
 
+        case ("POST", _) where segments.count >= 2 && segments[0] == "batch":
+            guard ble.state == .ready else {
+                respond(conn, status: 503, body: ["error": "Not connected"])
+                return
+            }
+            let hexPackets = segments[1].split(separator: ",").map(String.init)
+            var packets: [Data] = []
+            for hex in hexPackets {
+                if let data = Data(hexString: hex) {
+                    packets.append(data)
+                }
+            }
+            guard !packets.isEmpty else {
+                respond(conn, status: 400, body: ["error": "No valid hex packets"])
+                return
+            }
+            let delayMs = segments.count > 2 ? (Int(segments[2]) ?? 20) : 20
+            Task {
+                for (i, pkt) in packets.enumerated() {
+                    ble.send(pkt)
+                    if i < packets.count - 1 {
+                        try? await Task.sleep(for: .milliseconds(delayMs))
+                    }
+                }
+                self.respond(conn, status: 200, body: [
+                    "ok": true, "action": "batch",
+                    "packets": packets.count, "delay_ms": delayMs
+                ])
+            }
+
         case ("POST", ["reconnect"]):
             ble.disconnect()
             ble.startScanning()
@@ -184,7 +214,8 @@ class HTTPServer: ObservableObject {
                     "POST /power/off",
                     "POST /brightness/{0-15}",
                     "POST /delete",
-                    "POST /raw?hex=aa55...",
+                    "POST /raw/{hex}",
+                    "POST /batch/{hex1,hex2,...}[/{delay_ms}]",
                     "POST /reconnect",
                 ]
             ])

@@ -1,0 +1,21 @@
+#pragma once
+
+#include "secrets.h"  // WIFI_SSID, WIFI_PASS, OPENWEATHER_KEY
+
+#define SIGN_BLE_NAME "I_TL"
+#define SIGN_W 96
+#define SIGN_H 22
+
+#define HTTP_PORT 80
+#define MDNS_HOSTNAME "led-sign"
+
+#define NTP_SERVER "pool.ntp.org"
+#define TZ_POSIX "EST5EDT,M3.2.0,M11.1.0"
+
+#define WEATHER_LAT 38.895
+#define WEATHER_LON -77.264
+#define WEATHER_INTERVAL_MS 120000
+#define DISPLAY_UPDATE_MS 60000
+#define FORECAST_FLASH_MS 300000
+#define FORECAST_FLASH_DURATION_MS 10000
+#define WATCHDOG_INTERVAL_MS 120000
