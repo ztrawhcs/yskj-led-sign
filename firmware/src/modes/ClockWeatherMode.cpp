@@ -185,10 +185,7 @@ void ClockWeatherMode::forceUpdate() {
 }
 
 void ClockWeatherMode::showForecast() {
-    if (_weather.hourlyCount >= 24) {
-        renderForecastFlash();
-        _forceRedraw = true;
-    }
+    _forecastRequested = true;
 }
 
 void ClockWeatherMode::setClockLayout(int layout) {
@@ -551,6 +548,13 @@ void ClockWeatherMode::loop() {
         _hasPrevFrame = false;
     }
 
+    if (_forecastRequested && _weather.hourlyCount >= 24) {
+        _forecastRequested = false;
+        renderForecastFlash();
+        _lastForecastFlash = millis();
+        return;
+    }
+
     if (_weather.hourlyCount >= 24 && _lastForecastFlash > 0 &&
         now - _lastForecastFlash > 300000) {
         renderForecastFlash();
@@ -616,7 +620,7 @@ void ClockWeatherMode::loop() {
             int minAdv = digitAdv(mBuf[0]) + digitGap + digitAdv(mBuf[1]);
             int timeW = hourAdv + colonLPad + dotSize + colonRPad + minAdv;
             int ampmW = PixelFont::stringWidth(timeinfo.tm_hour >= 12 ? "PM" : "AM");
-            int clockPortionW = timeW + 2 + ampmW + 4; // ampmGap + animGap
+            int clockPortionW = timeW + 2 + ampmW + 8; // ampmGap + padding
             int gifX = max(clockPortionW, (int)Framebuffer::W / 2);
             int gifW = Framebuffer::W - gifX;
 
@@ -739,6 +743,7 @@ void ClockWeatherMode::fetchWeather() {
                      "latitude=" + String(WEATHER_LAT, 3) +
                      "&longitude=" + String(WEATHER_LON, 3) +
                      "&hourly=temperature_2m,uv_index,weather_code,precipitation_probability"
+                     "&daily=temperature_2m_max,temperature_2m_min"
                      "&current=temperature_2m,weather_code,is_day,relative_humidity_2m,uv_index"
                      "&temperature_unit=fahrenheit"
                      "&timezone=America%2FNew_York"
@@ -813,17 +818,23 @@ void ClockWeatherMode::fetchWeather() {
                         _weather.hourlyPrecipProb[i] = 0;
                     _weather.hourlyCount++;
                 }
-                _weather.tempHigh = hi;
-                _weather.tempLow = lo;
+                // Use daily max/min from API (more accurate than hourly-derived)
+                JsonArray dailyMax = doc["daily"]["temperature_2m_max"];
+                JsonArray dailyMin = doc["daily"]["temperature_2m_min"];
+                if (dailyMax.size() > 0 && dailyMin.size() > 0) {
+                    _weather.tempHigh = dailyMax[0].as<float>();
+                    _weather.tempLow = dailyMin[0].as<float>();
+                } else {
+                    _weather.tempHigh = hi;
+                    _weather.tempLow = lo;
+                }
+
                 // Tomorrow: indices 24-47
                 _weather.tomorrowCount = 0;
-                float tHi = -999, tLo = 999;
                 for (int i = 24; i < 48 && i < (int)temps.size(); i++) {
                     int j = i - 24;
                     float t = temps[i].as<float>();
                     _weather.tomorrowHourly[j] = t;
-                    if (t > tHi) tHi = t;
-                    if (t < tLo) tLo = t;
                     if (i < (int)wmos.size())
                         _weather.tomorrowWMO[j] = wmos[i].as<int>();
                     else
@@ -834,8 +845,18 @@ void ClockWeatherMode::fetchWeather() {
                         _weather.tomorrowPrecipProb[j] = 0;
                     _weather.tomorrowCount++;
                 }
-                _weather.tomorrowHigh = tHi;
-                _weather.tomorrowLow = tLo;
+                if (dailyMax.size() > 1 && dailyMin.size() > 1) {
+                    _weather.tomorrowHigh = dailyMax[1].as<float>();
+                    _weather.tomorrowLow = dailyMin[1].as<float>();
+                } else {
+                    float tHi = -999, tLo = 999;
+                    for (int j = 0; j < _weather.tomorrowCount; j++) {
+                        if (_weather.tomorrowHourly[j] > tHi) tHi = _weather.tomorrowHourly[j];
+                        if (_weather.tomorrowHourly[j] < tLo) tLo = _weather.tomorrowHourly[j];
+                    }
+                    _weather.tomorrowHigh = tHi;
+                    _weather.tomorrowLow = tLo;
+                }
             }
         }
         http.end();
@@ -1433,7 +1454,7 @@ void ClockWeatherMode::renderForecastFlash() {
         0x02,0x02,0x44,0x01,0x00,
         0x3B
     };
-    auto clearPkts = buildGifProgram(BLACK_GIF, sizeof(BLACK_GIF), 1, 0, 0, 1, 1);
+    auto clearPkts = buildGifProgram(BLACK_GIF, sizeof(BLACK_GIF), 1, 0, 0, Framebuffer::W, Framebuffer::H);
     for (size_t i = 0; i < clearPkts.size(); i++) {
         _ble->send(clearPkts[i]);
         delay(80);
@@ -1473,18 +1494,20 @@ void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
         for (int fy = row; fy < VISIBLE_H; fy++)
             fb.putPixel(x, fy, (fy == row) ? c : dim);
 
-        int h = (int)hourF;
-        if (h < 24) {
-            int prob = precipProb[h];
-            if (prob > 0) {
-                uint8_t b;
-                if (prob >= 60)      b = 200;
-                else if (prob >= 30) b = 90;
-                else                 b = 35;
-                RGB rain = {0, 0, b};
-                fb.putPixel(x, VISIBLE_H - 1, rain);
-                fb.putPixel(x, VISIBLE_H - 2, rain);
-            }
+        float probVal = precipProb[h0] * (1.0f - fracH) + precipProb[min(h0 + 1, 23)] * fracH;
+        if (probVal > 1.0f) {
+            float pf = probVal / 100.0f;
+            uint8_t rb = (uint8_t)(30 + pf * 170);
+            uint8_t rg = (uint8_t)(pf * pf * 80);
+            uint8_t rr = (uint8_t)(pf * pf * 40);
+            // Blend with the graph fill color underneath
+            RGB under = dim;
+            RGB rain1 = {(uint8_t)(under.r + (rr - under.r) * pf),
+                         (uint8_t)(under.g + (rg - under.g) * pf),
+                         (uint8_t)(under.b + (rb - under.b) * pf)};
+            RGB rain2 = {rr, rg, rb};
+            fb.putPixel(x, VISIBLE_H - 2, rain1);
+            fb.putPixel(x, VISIBLE_H - 1, rain2);
         }
     }
 
@@ -1567,8 +1590,8 @@ void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
     snprintf(loBuf, sizeof(loBuf), "%d", (int)tLow);
     RGB loC = tempColor((int)tLow);
     int loW = PixelFont::stringWidth(loBuf);
-    fb.fillRect(Framebuffer::W - loW - 2, VISIBLE_H - 6, Framebuffer::W - 1, VISIBLE_H - 1, {0, 0, 0});
-    PixelFont::drawString(fb, loBuf, Framebuffer::W - loW - 1, VISIBLE_H - 5, loC);
+    fb.fillRect(Framebuffer::W - loW - 2, VISIBLE_H - 8, Framebuffer::W - 1, VISIBLE_H - 3, {0, 0, 0});
+    PixelFont::drawString(fb, loBuf, Framebuffer::W - loW - 1, VISIBLE_H - 7, loC);
 
     // UV peak label — placed under highest-temp section (most space below graph line)
     float peakUV = 0;
@@ -1595,7 +1618,7 @@ void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
         }
         int lx = (int)((bestH + labelWidthHours / 2.0f) * pxPerHour) - fullW / 2;
         lx = max(0, min(Framebuffer::W - fullW - 1, lx));
-        int ly = VISIBLE_H - 6;
+        int ly = VISIBLE_H - 8;
 
         fb.fillRect(lx - 1, ly - 1, lx + fullW, ly + 5, {0, 0, 0});
         int pcx = lx;
@@ -2072,7 +2095,7 @@ void ClockWeatherMode::buildAnimPalette(RGB* palette, int* numColors) {
     palette[n++] = {ir, ig, ib};
 
     // Particle colors
-    RGB pColors[4];
+    RGB pColors[8];
     int pCount = 0;
     WeatherParticles::getParticleColors(
         WeatherParticles::typeFromIcon(_weather.icon.c_str()), pColors, &pCount);
@@ -2086,8 +2109,8 @@ void ClockWeatherMode::buildAnimPalette(RGB* palette, int* numColors) {
 }
 
 bool ClockWeatherMode::generateAndUploadGif() {
-    const int NUM_FRAMES = 6;
-    const int FRAME_DELAY_CS = 15; // 150ms per frame
+    const int NUM_FRAMES = 12;
+    const int FRAME_DELAY_CS = 12; // 150ms per frame
 
     RGB palette[16];
     int numColors = 0;
@@ -2109,7 +2132,7 @@ bool ClockWeatherMode::generateAndUploadGif() {
     for (int f = 0; f < NUM_FRAMES; f++) {
         fb.clear();
         drawClockFace(fb);
-        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES);
+        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES, (int)(millis() / 1000));
 
         // Quantize to palette
         for (int y = 0; y < Framebuffer::H; y++) {
@@ -2150,8 +2173,8 @@ bool ClockWeatherMode::generateAndUploadGif() {
 
 bool ClockWeatherMode::generateSplitWeatherGif(int gifX, int gifW) {
     const int GIF_H = Framebuffer::H;
-    const int NUM_FRAMES = 6;
-    const int FRAME_DELAY_CS = 15;
+    const int NUM_FRAMES = 12;
+    const int FRAME_DELAY_CS = 12;
 
     RGB palette[16];
     int numColors = 0;
@@ -2200,7 +2223,7 @@ bool ClockWeatherMode::generateSplitWeatherGif(int gifX, int gifW) {
         fb.clear();
 
         // Draw weather content at absolute positions, will extract gifX region
-        int wx = gifX + 2; // small left margin within GIF
+        int wx = gifX + 3; // left margin within GIF (skip column 0 to avoid edge artifacts)
         drawTempStr(fb, tempLine, wx, 1, tempClr);
         if (endLine[0]) {
             RGB drop = {60, 120, 255};
@@ -2224,7 +2247,11 @@ bool ClockWeatherMode::generateSplitWeatherGif(int gifX, int gifW) {
         }
 
         // Rain particles across the whole screen, we extract just our region
-        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES);
+        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES, (int)(millis() / 1000));
+
+        // Clear first column to avoid edge artifact at GIF boundary
+        for (int y = 0; y < GIF_H; y++)
+            fb.putPixel(gifX, y, {0, 0, 0});
 
         // Extract the GIF region and quantize
         for (int y = 0; y < GIF_H; y++) {
@@ -2277,8 +2304,8 @@ void ClockWeatherMode::setAnimStyle(int style) {
 bool ClockWeatherMode::testRegionalGif() {
     const int GIF_W = 30, GIF_H = Framebuffer::H;
     const int GIF_X = Framebuffer::W - GIF_W;
-    const int NUM_FRAMES = 6;
-    const int FRAME_DELAY_CS = 15;
+    const int NUM_FRAMES = 12;
+    const int FRAME_DELAY_CS = 12;
 
     // Freeze display updates for 15 seconds
     _testHoldUntil = millis() + 15000;
@@ -2290,7 +2317,7 @@ bool ClockWeatherMode::testRegionalGif() {
     palette[numColors++] = {0, 0, 0};
 
     auto ptype = WeatherParticles::typeFromIcon("rain");
-    RGB pColors[4];
+    RGB pColors[8];
     int pCount = 0;
     WeatherParticles::getParticleColors(ptype, pColors, &pCount);
     for (int i = 0; i < pCount && numColors < 16; i++)
@@ -2309,7 +2336,7 @@ bool ClockWeatherMode::testRegionalGif() {
 
     for (int f = 0; f < NUM_FRAMES; f++) {
         fb.clear();
-        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES);
+        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES, (int)(millis() / 1000));
 
         for (int y = 0; y < GIF_H; y++) {
             for (int x = 0; x < GIF_W; x++) {

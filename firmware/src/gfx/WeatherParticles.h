@@ -7,7 +7,7 @@ enum ParticleType { NONE = 0, RAIN, SNOW, STORM };
 
 ParticleType typeFromIcon(const char* icon);
 bool needsAnimation(const char* icon);
-RGB renderParticles(Framebuffer& fb, ParticleType type, int frameIdx, int numFrames);
+RGB renderParticles(Framebuffer& fb, ParticleType type, int frameIdx, int numFrames, int seed = 0);
 void getParticleColors(ParticleType type, RGB* colors, int* count);
 
 }

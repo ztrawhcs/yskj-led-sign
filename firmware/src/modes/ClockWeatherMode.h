@@ -106,6 +106,7 @@ private:
     unsigned long _lastWatchdog = 0;
     WeatherData _weather;
     bool _forceRedraw = true;
+    volatile bool _forecastRequested = false;
     bool _clearTextOnNext = false;
     unsigned long _forecastUntil = 0;
     int _lastMinuteSent = -1;
