@@ -7,18 +7,26 @@
 #include <vector>
 
 struct WeatherData {
-    int temp = 70;
+    int temp = 0;
     int humidity = 0;
     float uvIndex = 0;
     String icon = "cloud";
     int code = 0;
     bool isDay = true;
+    bool valid = false;
     float hourly[24] = {};
     float hourlyUV[24] = {};
     int hourlyWMO[24] = {};
+    int hourlyPrecipProb[24] = {};
     int hourlyCount = 0;
     float tempHigh = 0;
     float tempLow = 0;
+    float tomorrowHourly[24] = {};
+    int tomorrowWMO[24] = {};
+    int tomorrowPrecipProb[24] = {};
+    int tomorrowCount = 0;
+    float tomorrowHigh = 0;
+    float tomorrowLow = 0;
 };
 
 class ClockWeatherMode {
@@ -44,12 +52,17 @@ public:
     int customIconY() const { return _cIconY; }
     int customIconSize() const { return _cIconSize; }
     int currentTemp() const { return _weather.temp; }
+    bool weatherValid() const { return _weather.valid; }
     int currentHumidity() const { return _weather.humidity; }
     float currentUV() const { return _weather.uvIndex; }
     const String& currentIcon() const { return _weather.icon; }
     void setWeatherIcon(const String& icon) { _weather.icon = icon; _forceRedraw = true; _lastWeatherFetch = millis(); }
     void setTimeColor(uint8_t r, uint8_t g, uint8_t b);
     void sendTestFrame(Framebuffer& fb);
+    bool testRegionalGif();
+    unsigned long _testHoldUntil = 0;
+    void setAnimStyle(int style);
+    int getAnimStyle() const { return _animStyle; }
     uint8_t timeColorR() const { return _cTimeColor.r; }
     uint8_t timeColorG() const { return _cTimeColor.g; }
     uint8_t timeColorB() const { return _cTimeColor.b; }
@@ -96,6 +109,11 @@ private:
     bool _clearTextOnNext = false;
     unsigned long _forecastUntil = 0;
     int _lastMinuteSent = -1;
+    int _lastHourSent = -1;
+    int _lastTempSent = -999;
+    String _lastIconSent;
+    int _minRegionX0 = 0, _minRegionY0 = 0, _minRegionX1 = 0, _minRegionY1 = 0;
+    bool _minRegionValid = false;
     int _clockLayout = 0;  // 0=normal, 1=large-statusbar, 2=large-stacked, 3=custom
     int _fontId = 0;       // 0=standard, 1=rounded, 2=digital, 3=detailed5x7
     bool _fontAA = false;  // anti-aliasing
@@ -120,10 +138,20 @@ private:
     bool _hasPrevFrame = false;
 
     // GIF animation mode
-    enum DisplayMode { DISPLAY_RT_DRAW = 0, DISPLAY_GIF_PROGRAM = 1 };
+    enum DisplayMode { DISPLAY_RT_DRAW = 0, DISPLAY_GIF_PROGRAM = 1, DISPLAY_SPLIT = 2 };
     DisplayMode _displayMode = DISPLAY_RT_DRAW;
     int _gifFailCount = 0;
     static const int MAX_GIF_FAILS = 3;
+
+    // Animation style: 0 = full-screen GIF, 1 = split (regional GIF + rt_draw)
+    int _animStyle = 1; // default to split (no flash)
+    // Split mode state
+    bool _splitGifActive = false;
+    int _splitGifTemp = -999;
+    String _splitGifIcon;
+    int _splitGifX = 0;
+    int _splitGifW = 0;
+    int _splitLastHour = -1;
 
     // Timer / Stopwatch state
     TimerMode _timerMode = TIMER_NONE;
@@ -179,12 +207,14 @@ private:
     void drawForecastFullscreen(Framebuffer& fb);
     void drawTimerFace(Framebuffer& fb);
     bool generateAndUploadGif();
+    bool generateSplitWeatherGif(int gifX, int gifW);
     void buildAnimPalette(RGB* palette, int* numColors);
 
     static RGB tempColor(int tempF);
     static const char* iconColor(const char* icon, uint8_t& r, uint8_t& g, uint8_t& b);
     static const char* wmoToIcon(int code, bool isDay);
 
+    void stopGifProgram();
     void sendFrame(Framebuffer& fb, int maxColors = 12);
     void sendRegion(Framebuffer& fb, int x0, int y0, int x1, int y1, int maxColors = 2);
 };

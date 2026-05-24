@@ -81,7 +81,12 @@ button.send:hover{background:#4a9aff}
 <div class="field"><label>Scroll</label><select id="custom-scroll"><option value="left">Scroll</option><option value="static">Static</option></select></div>
 <div class="field"><label>Speed</label><input type="range" id="custom-speed" min="1" max="20" value="10"></div>
 </div>
-<button class="send" onclick="sendText()">Send Text</button></div>
+<div class="row">
+<div class="field"><label>Display</label><select id="custom-display"><option value="continuous">Continuous</option><option value="intermittent">Every 2 min (with clock)</option></select></div>
+<div class="field"><label>Duration</label><select id="custom-duration"><option value="0">Until Cancelled</option><option value="1">1 minute</option><option value="5">5 minutes</option><option value="15">15 minutes</option><option value="30">30 minutes</option><option value="60">1 hour</option></select></div>
+</div>
+<button class="send" onclick="sendText()">Send Text</button>
+<button class="send" id="cancel-text-btn" style="display:none;background:#c33;margin-top:6px" onclick="cancelText()">Cancel Text</button></div>
 <div class="card" id="msg-panel" style="display:none"><h2>Message</h2>
 <div class="row">
 <div class="field"><label>Message</label><input type="text" id="msg-text" placeholder="Message..."></div>
@@ -119,6 +124,12 @@ button.send:hover{background:#4a9aff}
 <option value="5">Rounded + AA</option>
 <option value="6">Block + AA</option>
 <option value="7">Detailed 5x7 + AA</option>
+</select></div>
+</div>
+<div class="card"><h2>Weather Animation</h2>
+<div class="field"><select id="anim-style" onchange="setAnimStyle(this.value)">
+<option value="1">Split (smooth clock + rain right)</option>
+<option value="0">Full Screen (rain everywhere)</option>
 </select></div>
 </div>
 <div class="card">
@@ -189,10 +200,20 @@ function showPanel(p){
  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode===p));
 }
 function sendText(){
+ var mins=document.getElementById('custom-duration').value;
+ var disp=document.getElementById('custom-display').value;
  setMode('text',{text:document.getElementById('custom-text').value,
   color:document.getElementById('custom-color').value,
   scroll:document.getElementById('custom-scroll').value,
-  speed:parseInt(document.getElementById('custom-speed').value)});
+  speed:parseInt(document.getElementById('custom-speed').value),
+  minutes:mins,display:disp});
+ document.getElementById('cancel-text-btn').style.display='block';
+}
+function cancelText(){
+ fetch('/api/cancel-text').then(()=>{
+  document.getElementById('cancel-text-btn').style.display='none';
+  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.toggle('active',b.dataset.mode==='clock'));
+ });
 }
 function sendMsg(){
  setMode('message',{text:document.getElementById('msg-text').value,
@@ -336,6 +357,7 @@ function pickLayout(v){
  fetch('/api/settings?layout='+v);
  render();
 }
+function setAnimStyle(v){fetch('/api/settings?anim_style='+v)}
 function pickFont(v){
  var fid=(+v)%4;
  var aa=+v>=4?1:0;
@@ -436,6 +458,7 @@ function poll(){
    document.getElementById('custom-opts').className=curLayout===3?'':'hidden';
    cv.className=curLayout===3?'draggable':'';}
   if(d.font_id!=null){var fv=d.font_id+(d.font_aa?4:0);document.getElementById('font-sel').value=fv;}
+  if(d.anim_style!=null)document.getElementById('anim-style').value=d.anim_style;
   if(d.time_color){timeCol=d.time_color;document.getElementById('time-color').value=d.time_color;}
   if(d.temp!=null)wx.t=d.temp;
   if(d.weather_icon)wx.ic=d.weather_icon;
@@ -446,6 +469,12 @@ function poll(){
   if(d.timer_mode!=null)updateTimerUI({timer_mode:d.timer_mode,timer_running:d.timer_running,elapsed:d.timer_elapsed,remaining:d.timer_remaining});
   if(d.rss_url)document.getElementById('rss-url').value=d.rss_url;
   if(d.proxy_url)document.getElementById('proxy-url').value=d.proxy_url;
+  var cb=document.getElementById('cancel-text-btn');
+  if(d.text_active){cb.style.display='block';
+   var mr=d.text_minutes_remaining;
+   var lbl=d.text_intermittent?'Cancel (every 2m':'Cancel (continuous';
+   cb.textContent=mr<0?lbl+', indefinite)':lbl+', '+mr+' min left)';
+  }else{cb.style.display='none';}
   render();
  }).catch(()=>{});
  setTimeout(poll,3000);
@@ -467,9 +496,12 @@ poll();
         doc["brightness"] = _brightness;
         doc["uptime_sec"] = millis() / 1000;
         doc["free_heap"] = ESP.getFreeHeap();
+        doc["free_psram"] = ESP.getFreePsram();
+        doc["psram_size"] = ESP.getPsramSize();
         doc["wifi_rssi"] = WiFi.RSSI();
         doc["clock_layout"] = clockMode.getClockLayout();
         doc["temp"] = clockMode.currentTemp();
+        doc["weather_valid"] = clockMode.weatherValid();
         doc["humidity"] = clockMode.currentHumidity();
         doc["uv_index"] = clockMode.currentUV();
         doc["weather_icon"] = clockMode.currentIcon();
@@ -483,6 +515,7 @@ poll();
         doc["ci_sz"] = clockMode.customIconSize();
         doc["font_id"] = clockMode.getFontId();
         doc["font_aa"] = clockMode.getFontAA();
+        doc["anim_style"] = clockMode.getAnimStyle();
         char tcHex[8];
         snprintf(tcHex, sizeof(tcHex), "#%02x%02x%02x",
             clockMode.timeColorR(), clockMode.timeColorG(), clockMode.timeColorB());
@@ -496,6 +529,9 @@ poll();
         doc["notif_count"] = clockMode.notifCount();
         doc["calendar_url"] = clockMode.getCalendarUrl();
         doc["calendar_events"] = clockMode.calendarEventCount();
+        doc["text_active"] = _modes->isTextActive();
+        doc["text_intermittent"] = _modes->isTextIntermittent();
+        doc["text_minutes_remaining"] = _modes->textMinutesRemaining();
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
@@ -517,32 +553,30 @@ poll();
             _modes->setMode(ModeManager::OFF);
             _ble->send(Commands::powerOff());
         } else if (mode == "text") {
-            _modes->setMode(ModeManager::TEXT);
             String text = req->arg("text");
             String color = req->arg("color");
             String scroll = req->arg("scroll");
             int speed = req->arg("speed").toInt();
+            int minutes = req->arg("minutes").toInt(); // 0 = indefinite
+            String display = req->arg("display"); // "continuous" or "intermittent"
             if (color.isEmpty()) color = "#3282ff";
             if (scroll.isEmpty()) scroll = "left";
             if (speed == 0) speed = 10;
+            bool intermittent = (display == "intermittent");
 
             uint8_t r = strtol(color.substring(1, 3).c_str(), nullptr, 16);
             uint8_t g = strtol(color.substring(3, 5).c_str(), nullptr, 16);
             uint8_t b = strtol(color.substring(5, 7).c_str(), nullptr, 16);
 
-            int duration = req->arg("duration").toInt();
-            if (duration == 0) duration = max(8, (int)(text.length() * 0.4f) + 5);
             TextProgramConfig cfg;
             cfg.scroll = scroll;
             cfg.speed = speed;
             cfg.fontSize = 16;
-            cfg.duration = duration;
             TextSegment seg;
             seg.text = text + "          ";
             seg.r = r; seg.g = g; seg.b = b;
             cfg.segments.push_back(seg);
-            auto pkts = buildTextProgram("", cfg);
-            sendPackets(_ble, pkts);
+            _modes->startRepeatingText(cfg, minutes, intermittent);
         } else if (mode == "message") {
             String text = req->arg("text");
             String color = req->arg("color");
@@ -607,6 +641,25 @@ poll();
     });
 
     // ---------------------------------------------------------------
+    // GET /api/test-regional — test regional GIF + rt_draw coexistence
+    // ---------------------------------------------------------------
+    _server.on("/api/test-regional", HTTP_GET, [this](AsyncWebServerRequest* req) {
+        _requestCount++;
+        bool ok = clockMode.testRegionalGif();
+        String result = ok ? R"({"ok":true,"action":"test-regional"})"
+                           : R"({"ok":false,"error":"test failed"})";
+        req->send(200, "application/json", result);
+    });
+
+    // GET /api/cancel-text — stop repeating text, revert to clock
+    // ---------------------------------------------------------------
+    _server.on("/api/cancel-text", HTTP_GET, [this](AsyncWebServerRequest* req) {
+        _requestCount++;
+        _modes->cancelText();
+        req->send(200, "application/json", R"({"ok":true,"action":"cancel-text"})");
+    });
+
+    // ---------------------------------------------------------------
     // GET /api/settings?clockScale=X — update display settings
     // ---------------------------------------------------------------
     _server.on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest* req) {
@@ -631,6 +684,11 @@ poll();
                 clockMode.setTimeColor(r, g, b);
                 Serial.printf("[HTTP] Time color set to %s\n", c.c_str());
             }
+        }
+        if (req->hasArg("anim_style")) {
+            int style = req->arg("anim_style").toInt();
+            clockMode.setAnimStyle(style);
+            Serial.printf("[HTTP] Anim style set to %d\n", style);
         }
         if (req->hasArg("ct_x")) {
             clockMode.setCustomPositions(

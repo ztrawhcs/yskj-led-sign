@@ -25,7 +25,13 @@ static void appendVarLen(std::vector<uint8_t>& v, size_t n) {
 }
 
 std::vector<std::vector<uint8_t>> buildGifProgram(
-    const uint8_t* gifData, size_t gifLen, uint8_t programId) {
+    const uint8_t* gifData, size_t gifLen, uint8_t programId,
+    int regionX, int regionY, int regionW, int regionH) {
+
+    if (regionX < 0) regionX = 0;
+    if (regionY < 0) regionY = 0;
+    if (regionW <= 0) regionW = SIGN_W;
+    if (regionH <= 0) regionH = SIGN_H;
 
     uint32_t ts = (uint32_t)(millis() / 1000) + 1000000;
     uint8_t progIdx = programId - 1;
@@ -51,10 +57,10 @@ std::vector<std::vector<uint8_t>> buildGifProgram(
     // Region
     uint8_t rectTag[] = {0x0D, 0x01, 0x00, 0x1D, 0x09};
     appendBytes(progHdr, rectTag, 5);
-    appendLE16(progHdr, 0);       // x
-    appendLE16(progHdr, 0);       // y
-    appendLE16(progHdr, SIGN_W);  // w
-    appendLE16(progHdr, SIGN_H);  // h
+    appendLE16(progHdr, (uint16_t)regionX);
+    appendLE16(progHdr, (uint16_t)regionY);
+    appendLE16(progHdr, (uint16_t)regionW);
+    appendLE16(progHdr, (uint16_t)regionH);
     progHdr.push_back(0x00);      // bg_flag
 
     // Element 1: Item header

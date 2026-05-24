@@ -7,6 +7,7 @@
 #include "../protocol/AA55Packet.h"
 #include "../protocol/ProgramUpload.h"
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
@@ -147,9 +148,10 @@ void ClockWeatherMode::loadSettings() {
     _rssUrl = prefs.getString("rssUrl", "");
     _calendarUrl = prefs.getString("calUrl", "");
     _proxyUrl = prefs.getString("proxyUrl", "");
+    _animStyle = prefs.getInt("animStyle", 1);
     prefs.end();
-    Serial.printf("[Clock] Loaded: layout=%d font=%d aa=%d color=#%02x%02x%02x\n",
-        _clockLayout, _fontId, _fontAA, _cTimeColor.r, _cTimeColor.g, _cTimeColor.b);
+    Serial.printf("[Clock] Loaded: layout=%d font=%d aa=%d animStyle=%d color=#%02x%02x%02x\n",
+        _clockLayout, _fontId, _fontAA, _animStyle, _cTimeColor.r, _cTimeColor.g, _cTimeColor.b);
     if (_rssUrl.length() > 0)
         Serial.printf("[Clock] RSS: %s\n", _rssUrl.c_str());
     if (_proxyUrl.length() > 0)
@@ -238,6 +240,7 @@ void ClockWeatherMode::startCountdown(int totalSeconds) {
     _timerFinishedFlash = false;
     _timerFlashCount = 0;
     _forceRedraw = true;
+    stopGifProgram();
     Serial.printf("[Timer] Countdown started: %ds\n", totalSeconds);
 }
 
@@ -250,6 +253,7 @@ void ClockWeatherMode::startStopwatch() {
     _timerFinishedFlash = false;
     _timerFlashCount = 0;
     _forceRedraw = true;
+    stopGifProgram();
     Serial.println("[Timer] Stopwatch started");
 }
 
@@ -366,6 +370,22 @@ static void markShown(const String& title) {
 void ClockWeatherMode::loop() {
     unsigned long now = millis();
 
+    // Test hold — freeze display updates
+    if (_testHoldUntil > 0 && now < _testHoldUntil) return;
+    if (_testHoldUntil > 0) {
+        _testHoldUntil = 0;
+        _forceRedraw = true;
+        _hasPrevFrame = false;
+        Serial.println("[Test] Hold expired, resuming normal display");
+    }
+
+    // NWS alerts via Cloudflare Worker proxy (avoids HTTPS/TLS on ESP32)
+    if (WiFi.status() == WL_CONNECTED &&
+        (now - _lastAlertFetch > 300000 || (_lastAlertFetch == 0 && _lastWeatherFetch > 0))) {
+        fetchWeatherAlerts();
+        _lastAlertFetch = now;
+    }
+
     // Weather fetch doesn't need BLE — run it over WiFi regardless
     if (WiFi.status() == WL_CONNECTED &&
         (_lastWeatherFetch == 0 || now - _lastWeatherFetch > 120000)) {
@@ -375,13 +395,8 @@ void ClockWeatherMode::loop() {
 
     if (!_ble || !_ble->isReady()) return;
 
-    // News fetch every 15 minutes, only 7am-9pm
-    struct tm newsTime;
-    bool newsHours = getLocalTime(&newsTime) && newsTime.tm_hour >= 7 && newsTime.tm_hour < 21;
-    if (newsHours && (now - _lastNewsFetch > 900000 || _lastNewsFetch == 0)) {
-        fetchNews();
-        _lastNewsFetch = now;
-    }
+    // News disabled
+    bool newsHours = false;
 
     // Calendar fetch every 5 minutes (from Google Apps Script)
     if (_calendarUrl.length() > 0 && (now - _lastCalFetch > 300000 || _lastCalFetch == 0)) {
@@ -389,11 +404,7 @@ void ClockWeatherMode::loop() {
         _lastCalFetch = now;
     }
 
-    // NWS weather alerts every 5 minutes
-    if (now - _lastAlertFetch > 300000 || _lastAlertFetch == 0) {
-        fetchWeatherAlerts();
-        _lastAlertFetch = now;
-    }
+    // NWS alerts fetched earlier in loop (before weather) for max heap
 
     // Notification proxy poll every 30 seconds (only if proxy configured)
     if (_proxyUrl.length() > 0 && (now - _lastProxyPoll > 30000 || _lastProxyPoll == 0)) {
@@ -402,13 +413,15 @@ void ClockWeatherMode::loop() {
     }
 
     // Badge reminder: weekdays 7:30-9:00am, every 2 minutes
-    if (newsHours) {
-        bool badgeTime = newsTime.tm_wday >= 1 && newsTime.tm_wday <= 5 &&
-            ((newsTime.tm_hour == 7 && newsTime.tm_min >= 30) ||
-             (newsTime.tm_hour == 8));
+    struct tm badgeTm;
+    if (getLocalTime(&badgeTm)) {
+        bool badgeTime = badgeTm.tm_wday >= 1 && badgeTm.tm_wday <= 5 &&
+            ((badgeTm.tm_hour == 7 && badgeTm.tm_min >= 30) ||
+             (badgeTm.tm_hour == 8));
         if (badgeTime) {
             static unsigned long lastBadge = 0;
             if (now - lastBadge > 120000 || lastBadge == 0) {
+                stopGifProgram();
                 Serial.println("[Badge] Showing badge reminder via rt_draw");
                 static Framebuffer bfb;
                 bfb.clear();
@@ -466,6 +479,7 @@ void ClockWeatherMode::loop() {
 
     // Weather alerts: show static for 5s every 5 minutes while active
     if (_alertCount > 0 && (now - _lastAlertShow > 300000 || _lastAlertShow == 0)) {
+        stopGifProgram();
         static Framebuffer afb;
         afb.clear();
         RGB border = {255, 255, 0};
@@ -513,6 +527,7 @@ void ClockWeatherMode::loop() {
     static unsigned long _lastUvAlert = 0;
     if (_weather.uvIndex >= 3.0f && _weather.isDay &&
         (_lastUvAlert == 0 || now - _lastUvAlert > 1800000)) {
+        stopGifProgram();
         int burnMin = (int)(200.0f / (_weather.uvIndex * 2.5f));
         if (burnMin < 1) burnMin = 1;
         static Framebuffer uvfb;
@@ -551,22 +566,83 @@ void ClockWeatherMode::loop() {
     int currentMinute = timeinfo.tm_hour * 60 + timeinfo.tm_min;
 
     bool wantAnim = WeatherParticles::needsAnimation(ic);
+    DisplayMode wantMode = DISPLAY_RT_DRAW;
+    if (wantAnim) wantMode = (_animStyle == 1) ? DISPLAY_SPLIT : DISPLAY_GIF_PROGRAM;
 
     // Mode transitions
-    if (wantAnim && _displayMode == DISPLAY_RT_DRAW) {
-        Serial.println("[Clock] Switching to GIF program mode");
-        _displayMode = DISPLAY_GIF_PROGRAM;
+    if (wantMode != _displayMode) {
+        Serial.printf("[Clock] Switching to %s mode\n",
+            wantMode == DISPLAY_SPLIT ? "split" :
+            wantMode == DISPLAY_GIF_PROGRAM ? "GIF" : "rt_draw");
+        _displayMode = wantMode;
         _gifFailCount = 0;
         _forceRedraw = true;
         _hasPrevFrame = false;
-    } else if (!wantAnim && _displayMode == DISPLAY_GIF_PROGRAM) {
-        Serial.println("[Clock] Switching to rt_draw mode");
-        _displayMode = DISPLAY_RT_DRAW;
-        _forceRedraw = true;
-        _hasPrevFrame = false;
+        _splitGifActive = false;
     }
 
-    if (_displayMode == DISPLAY_GIF_PROGRAM) {
+    if (_displayMode == DISPLAY_SPLIT) {
+        int hour12 = timeinfo.tm_hour % 12;
+        if (hour12 == 0) hour12 = 12;
+        bool needGifUpload = !_splitGifActive || _forceRedraw
+            || _weather.temp != _splitGifTemp
+            || _weather.icon != _splitGifIcon
+            || hour12 != _splitLastHour;
+
+        if (needGifUpload) {
+            // Calculate layout to find weather region
+            int fid = _fontId;
+            int fw = FONT_W[fid];
+            int scale = 2;
+            if (fid == 3) scale = 2;
+            int digitW = fw * scale;
+            auto digitAdv = [&](char c) -> int {
+                return (c == '1') ? max((int)scale, (fw - 1) * scale) : digitW;
+            };
+            char hBuf[4];
+            snprintf(hBuf, sizeof(hBuf), "%d", hour12);
+            int hLen = strlen(hBuf);
+            char mBuf[4];
+            snprintf(mBuf, sizeof(mBuf), "%02d", timeinfo.tm_min);
+            int colonLPad = max(1, scale - 2);
+            int colonRPad = scale;
+            int dotSize = scale;
+            int digitGap = scale;
+            int hourAdv = 0;
+            for (int i = 0; i < hLen; i++) {
+                if (i > 0) hourAdv += digitGap;
+                hourAdv += digitAdv(hBuf[i]);
+            }
+            int minAdv = digitAdv(mBuf[0]) + digitGap + digitAdv(mBuf[1]);
+            int timeW = hourAdv + colonLPad + dotSize + colonRPad + minAdv;
+            int ampmW = PixelFont::stringWidth(timeinfo.tm_hour >= 12 ? "PM" : "AM");
+            int clockPortionW = timeW + 2 + ampmW + 4; // ampmGap + animGap
+            int gifX = max(clockPortionW, (int)Framebuffer::W / 2);
+            int gifW = Framebuffer::W - gifX;
+
+            bool ok = generateSplitWeatherGif(gifX, gifW);
+            if (ok) {
+                _splitGifActive = true;
+                _splitGifTemp = _weather.temp;
+                _splitGifIcon = _weather.icon;
+                _splitGifX = gifX;
+                _splitGifW = gifW;
+                _splitLastHour = hour12;
+                _hasPrevFrame = false;
+                _forceRedraw = true;
+                Serial.printf("[Split] Weather GIF at x=%d w=%d\n", gifX, gifW);
+            }
+        }
+        // rt_draw the clock (left portion) with minute-only updates
+        if (_forceRedraw || currentMinute != _lastMinuteSent) {
+            if (timeinfo.tm_sec <= 2 || _forceRedraw) {
+                renderClock();
+                _lastMinuteSent = currentMinute;
+                _forceRedraw = false;
+            }
+        }
+
+    } else if (_displayMode == DISPLAY_GIF_PROGRAM) {
         if (_forceRedraw || currentMinute != _lastMinuteSent) {
             if (timeinfo.tm_sec <= 5 || _forceRedraw) {
                 bool ok = generateAndUploadGif();
@@ -619,7 +695,7 @@ void ClockWeatherMode::fetchWeather() {
     static bool owmKeyValid = true;
     if (owmKeyValid) {
         HTTPClient http;
-        String url = "https://api.openweathermap.org/data/2.5/weather?"
+        String url = "http://api.openweathermap.org/data/2.5/weather?"
                      "lat=" + String(WEATHER_LAT, 3) +
                      "&lon=" + String(WEATHER_LON, 3) +
                      "&appid=" OPENWEATHER_KEY
@@ -632,13 +708,19 @@ void ClockWeatherMode::fetchWeather() {
             String payload = http.getString();
             JsonDocument doc;
             if (!deserializeJson(doc, payload)) {
-                _weather.temp = (int)doc["main"]["temp"].as<float>();
+                JsonVariant tempVal = doc["main"]["temp"];
+                if (!tempVal.isNull()) {
+                    _weather.temp = (int)tempVal.as<float>();
+                } else {
+                    Serial.println("[Weather-OWM] temp field missing, keeping previous value");
+                }
                 _weather.humidity = doc["main"]["humidity"] | 0;
                 int wxId = doc["weather"][0]["id"] | 800;
                 const char* owmIcon = doc["weather"][0]["icon"] | "01d";
                 _weather.code = wxId;
                 _weather.isDay = (owmIcon[2] != 'n');
                 _weather.icon = owmToIcon(wxId, owmIcon);
+                _weather.valid = true;
                 gotCurrent = true;
                 Serial.printf("[Weather-OWM] %dF %d%% %s (id=%d)\n",
                     _weather.temp, _weather.humidity, _weather.icon.c_str(), wxId);
@@ -653,14 +735,14 @@ void ClockWeatherMode::fetchWeather() {
     // Open-Meteo: hourly forecast + current conditions (primary if OWM disabled)
     {
         HTTPClient http;
-        String url = "https://api.open-meteo.com/v1/forecast?"
+        String url = "http://api.open-meteo.com/v1/forecast?"
                      "latitude=" + String(WEATHER_LAT, 3) +
                      "&longitude=" + String(WEATHER_LON, 3) +
-                     "&hourly=temperature_2m,uv_index,weather_code"
+                     "&hourly=temperature_2m,uv_index,weather_code,precipitation_probability"
                      "&current=temperature_2m,weather_code,is_day,relative_humidity_2m,uv_index"
                      "&temperature_unit=fahrenheit"
                      "&timezone=America%2FNew_York"
-                     "&forecast_days=1";
+                     "&forecast_days=2";
         http.begin(url);
         http.setTimeout(10000);
         int code = http.GET();
@@ -672,14 +754,34 @@ void ClockWeatherMode::fetchWeather() {
                 // Always grab UV from Open-Meteo (OWM doesn't provide it)
                 _weather.uvIndex = doc["current"]["uv_index"] | 0.0f;
 
+                // Open-Meteo is better at precipitation detection than OWM —
+                // override icon if Meteo sees rain/snow but OWM didn't
+                int meteoWmo = doc["current"]["weather_code"] | 0;
+                if (gotCurrent && meteoWmo >= 50) {
+                    String meteoIcon = wmoToIcon(meteoWmo, _weather.isDay);
+                    if ((meteoIcon == "rain" || meteoIcon == "snow") &&
+                        _weather.icon != "rain" && _weather.icon != "snow") {
+                        Serial.printf("[Weather-Meteo] Overriding OWM icon '%s' → '%s' (wmo=%d)\n",
+                            _weather.icon.c_str(), meteoIcon.c_str(), meteoWmo);
+                        _weather.icon = meteoIcon;
+                        _weather.code = meteoWmo;
+                    }
+                }
+
                 if (!gotCurrent) {
-                    float t = doc["current"]["temperature_2m"] | 70.0f;
-                    _weather.temp = (int)t;
+                    JsonVariant tempVal = doc["current"]["temperature_2m"];
+                    if (!tempVal.isNull()) {
+                        _weather.temp = (int)tempVal.as<float>();
+                    } else {
+                        Serial.println("[Weather-Meteo] temperature_2m missing, keeping previous value");
+                    }
                     _weather.humidity = doc["current"]["relative_humidity_2m"] | 0;
                     int wmo = doc["current"]["weather_code"] | 0;
                     _weather.isDay = doc["current"]["is_day"] | 1;
                     _weather.icon = wmoToIcon(wmo, _weather.isDay);
                     _weather.code = wmo;
+                    _weather.valid = true;
+                    gotCurrent = true;
                     Serial.printf("[Weather-Meteo] %dF %d%% UV%.1f %s (wmo=%d)\n",
                         _weather.temp, _weather.humidity, _weather.uvIndex,
                         _weather.icon.c_str(), wmo);
@@ -688,6 +790,8 @@ void ClockWeatherMode::fetchWeather() {
                 JsonArray temps = doc["hourly"]["temperature_2m"];
                 JsonArray uvs = doc["hourly"]["uv_index"];
                 JsonArray wmos = doc["hourly"]["weather_code"];
+                JsonArray probs = doc["hourly"]["precipitation_probability"];
+                // Today: indices 0-23
                 _weather.hourlyCount = 0;
                 float hi = -999, lo = 999;
                 for (int i = 0; i < 24 && i < (int)temps.size(); i++) {
@@ -703,14 +807,42 @@ void ClockWeatherMode::fetchWeather() {
                         _weather.hourlyWMO[i] = wmos[i].as<int>();
                     else
                         _weather.hourlyWMO[i] = 0;
+                    if (i < (int)probs.size())
+                        _weather.hourlyPrecipProb[i] = probs[i].as<int>();
+                    else
+                        _weather.hourlyPrecipProb[i] = 0;
                     _weather.hourlyCount++;
                 }
                 _weather.tempHigh = hi;
                 _weather.tempLow = lo;
+                // Tomorrow: indices 24-47
+                _weather.tomorrowCount = 0;
+                float tHi = -999, tLo = 999;
+                for (int i = 24; i < 48 && i < (int)temps.size(); i++) {
+                    int j = i - 24;
+                    float t = temps[i].as<float>();
+                    _weather.tomorrowHourly[j] = t;
+                    if (t > tHi) tHi = t;
+                    if (t < tLo) tLo = t;
+                    if (i < (int)wmos.size())
+                        _weather.tomorrowWMO[j] = wmos[i].as<int>();
+                    else
+                        _weather.tomorrowWMO[j] = 0;
+                    if (i < (int)probs.size())
+                        _weather.tomorrowPrecipProb[j] = probs[i].as<int>();
+                    else
+                        _weather.tomorrowPrecipProb[j] = 0;
+                    _weather.tomorrowCount++;
+                }
+                _weather.tomorrowHigh = tHi;
+                _weather.tomorrowLow = tLo;
             }
         }
         http.end();
     }
+
+    if (!gotCurrent)
+        Serial.println("[Weather] Both APIs failed, keeping previous values");
 }
 
 // ---------------------------------------------------------------------------
@@ -734,12 +866,29 @@ void ClockWeatherMode::renderClock() {
         _hasPrevFrame = false;
     }
 
+    struct tm ti;
+    if (!getLocalTime(&ti)) return;
+    int hour12 = ti.tm_hour % 12;
+    if (hour12 == 0) hour12 = 12;
+
+    bool minuteOnly = _hasPrevFrame && _minRegionValid && !_forceRedraw
+        && hour12 == _lastHourSent
+        && _weather.temp == _lastTempSent
+        && _weather.icon == _lastIconSent;
+
     static Framebuffer fb;
     fb.clear();
     drawClockFace(fb);
 
-    if (_hasPrevFrame) {
-        // Find bounding box of changed pixels
+    if (minuteOnly) {
+        int rx0 = max(0, _minRegionX0);
+        int ry0 = max(0, _minRegionY0);
+        int rx1 = min((int)Framebuffer::W - 1, _minRegionX1);
+        int ry1 = min((int)Framebuffer::VISIBLE_H - 1, _minRegionY1);
+        sendRegion(fb, rx0, ry0, rx1, ry1, 4);
+        Serial.printf("[Clock] Minute-only update %d:%02d region [%d,%d]-[%d,%d]\n",
+            hour12, ti.tm_min, rx0, ry0, rx1, ry1);
+    } else if (_hasPrevFrame) {
         int dx0 = Framebuffer::W, dy0 = Framebuffer::VISIBLE_H, dx1 = -1, dy1 = -1;
         for (int y = 0; y < Framebuffer::VISIBLE_H; y++) {
             for (int x = 0; x < Framebuffer::W; x++) {
@@ -752,33 +901,32 @@ void ClockWeatherMode::renderClock() {
             }
         }
         if (dx1 >= 0) {
-            // Clear only the dirty region, then send full-screen bitmaps
             auto clearPayload = Framebuffer::buildRegionClear(dx0, dy0, dx1, dy1);
             auto clearPkt = AA55::buildPacket(AA55::nextSno(),
                 clearPayload.data(), clearPayload.size(), 0xC1, 2);
             _ble->send(clearPkt);
             delay(50);
-            // Send full-screen bitmap layers (proven format)
             auto allPackets = fb.buildRtDrawPackets(12);
-            // Skip the first packet (full-screen clear) — we already cleared the dirty region
             for (size_t i = 1; i < allPackets.size(); i++) {
                 _ble->send(allPackets[i]);
                 if (i < allPackets.size() - 1) delay(50);
             }
         }
+        Serial.printf("[Clock] Full update %d:%02d%s %dF %s\n",
+            hour12, ti.tm_min, ti.tm_hour >= 12 ? "PM" : "AM",
+            _weather.temp, _weather.icon.c_str());
     } else {
         sendFrame(fb, 12);
+        Serial.printf("[Clock] Initial frame %d:%02d%s %dF %s\n",
+            hour12, ti.tm_min, ti.tm_hour >= 12 ? "PM" : "AM",
+            _weather.temp, _weather.icon.c_str());
     }
 
     _prevFrame = fb;
     _hasPrevFrame = true;
-
-    struct tm ti;
-    getLocalTime(&ti);
-    Serial.printf("[Clock] %d:%02d%s %dF %s font=%d\n",
-        ti.tm_hour > 12 ? ti.tm_hour - 12 : (ti.tm_hour == 0 ? 12 : ti.tm_hour),
-        ti.tm_min, ti.tm_hour >= 12 ? "PM" : "AM",
-        _weather.temp, _weather.icon.c_str(), _fontId);
+    _lastHourSent = hour12;
+    _lastTempSent = _weather.temp;
+    _lastIconSent = _weather.icon;
 }
 
 // ---------------------------------------------------------------------------
@@ -955,7 +1103,10 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
     snprintf(ampmBuf, sizeof(ampmBuf), "%s", ti.tm_hour >= 12 ? "PM" : "AM");
 
     char tempFBuf[8];
-    snprintf(tempFBuf, sizeof(tempFBuf), "%dF", _weather.temp);
+    if (_weather.valid)
+        snprintf(tempFBuf, sizeof(tempFBuf), "%dF", _weather.temp);
+    else
+        snprintf(tempFBuf, sizeof(tempFBuf), "--");
     int tempW = tempStrWidth(tempFBuf);
     int iw7 = 7; // 7x7 icon width
     int ih7 = 7; // 7x7 icon height
@@ -965,17 +1116,30 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
     int colonLPad = max(1, scale - 2);   // tighter on left
     int colonRPad = scale;                // more space on right
     int dotSize = scale;                  // bigger colon dots
-    int timeW = hLen * digitW + (hLen - 1) * scale  // hour digits + spacing
-                + colonLPad + dotSize + colonRPad     // colon area (asymmetric: tight left, roomy right)
-                + 2 * digitW + scale;                 // minute digits + spacing
+    int digitGap = scale;                 // inter-digit spacing
+
+    // Proportional advance: "1" is narrower since its glyph is mostly one column
+    auto digitAdv = [&](char c) -> int {
+        return (c == '1') ? max((int)scale, (fw - 1) * scale) : digitW;
+    };
+
+    // Compute timeW from actual digit widths
+    int hourAdv = 0;
+    for (int i = 0; i < hLen; i++) {
+        if (i > 0) hourAdv += digitGap;
+        hourAdv += digitAdv(hourBuf[i]);
+    }
+    int minAdv = digitAdv(minBuf[0]) + digitGap + digitAdv(minBuf[1]);
+    int timeW = hourAdv + colonLPad + dotSize + colonRPad + minAdv;
 
     // Shared: draw time digits + colon, returns ending x
+    // Also records minute digit bounding box for partial updates
     auto drawTimeFn = [&](int startX, int startY) -> int {
         int cx = startX;
         for (int i = 0; i < hLen; i++) {
-            if (i > 0) cx += scale;
+            if (i > 0) cx += digitGap;
             drawScaledDigit(fb, hourBuf[i] - '0', cx, startY, fid, scale, timeColor, aa);
-            cx += digitW;
+            cx += digitAdv(hourBuf[i]);
         }
         // Colon: tight left, roomy right, bigger dots
         cx += colonLPad;
@@ -988,11 +1152,16 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
                 fb.putPixel(colonX + dx, centerY + dotOff - 1 + dy, timeColor);
             }
         cx += dotSize + colonRPad;
+        _minRegionX0 = cx;
+        _minRegionY0 = startY - (aa && scale >= 2 ? 1 : 0);
         for (int i = 0; i < 2; i++) {
             drawScaledDigit(fb, minBuf[i] - '0', cx, startY, fid, scale, timeColor, aa);
-            cx += digitW;
-            if (i == 0) cx += scale;
+            cx += digitAdv(minBuf[i]);
+            if (i == 0) cx += digitGap;
         }
+        _minRegionX1 = cx + (aa && scale >= 2 ? 1 : 0);
+        _minRegionY1 = startY + digitH + (scale >= 2 ? 1 : 0);
+        _minRegionValid = true;
         return cx;
     };
 
@@ -1000,11 +1169,24 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
 
     if (_clockLayout == 0) {
         bool animMode = _displayMode == DISPLAY_GIF_PROGRAM;
+        bool splitMode = _displayMode == DISPLAY_SPLIT;
         int ampmW = PixelFont::stringWidth(ampmBuf);
 
-        if (animMode) {
-            // GIF mode: temp + rain end time, with breathing room
-            int animGap = 8;
+        if (splitMode) {
+            // Split mode: only draw clock + AM/PM, centered in left portion
+            int leftW = _splitGifActive ? _splitGifX : Framebuffer::W / 2;
+            int ampmGap = 2;
+            int clockTotal = timeW + ampmGap + ampmW;
+            int xStart = max(0, (leftW - clockTotal) / 2);
+            int ty = max(0, (VISIBLE_H - digitH) / 2);
+
+            int cx = drawTimeFn(xStart, ty);
+            int ampmY = ty + digitH - 5;
+            PixelFont::drawString(fb, ampmBuf, cx + ampmGap, ampmY, timeColor);
+            _iconRegionValid = false;
+
+        } else if (animMode) {
+            int animGap = 4;
             char tempLine[8];
             snprintf(tempLine, sizeof(tempLine), "%dF", _weather.temp);
             int tempLineW = tempStrWidth(tempLine);
@@ -1031,22 +1213,22 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
                 }
             }
             int endLineW = (endLine[0]) ? PixelFont::stringWidth(endLine) : 0;
-
-            int weatherW = max(tempLineW, (int)(7 + 2 + endLineW));
-            int total = timeW + 1 + ampmW + animGap + weatherW;
+            int dropAndTextW = endLine[0] ? (5 + endLineW) : 0;
+            int weatherW = max(tempLineW, dropAndTextW);
+            int ampmGap = 2;
+            int total = timeW + ampmGap + ampmW + animGap + weatherW;
             int xStart = max(0, (Framebuffer::W - total) / 2);
             int ty = max(0, (VISIBLE_H - digitH) / 2);
 
             int cx = drawTimeFn(xStart, ty);
             int ampmY = ty + digitH - 5;
-            PixelFont::drawString(fb, ampmBuf, cx + 1, ampmY, timeColor);
-            cx += 1 + ampmW;
+            PixelFont::drawString(fb, ampmBuf, cx + ampmGap, ampmY, timeColor);
+            cx += ampmGap + ampmW;
 
             int wx = cx + animGap;
-            drawTempStr(fb, tempLine, wx, 0, tempClr);
+            drawTempStr(fb, tempLine, wx, 1, tempClr);
             if (endLine[0]) {
-                // Tiny 3x5 blue raindrop + end time
-                RGB drop = {30, 60, 140};
+                RGB drop = {60, 120, 255};
                 int dx = wx, dy = 9;
                 fb.putPixel(dx+1, dy,   drop);
                 fb.putPixel(dx,   dy+1, drop);
@@ -1059,8 +1241,11 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
                 fb.putPixel(dx+1, dy+3, drop);
                 fb.putPixel(dx+2, dy+3, drop);
                 fb.putPixel(dx+1, dy+4, drop);
-                RGB dimClr = {tempClr.r / 2, tempClr.g / 2, tempClr.b / 2};
-                PixelFont::drawString(fb, endLine, wx + 5, 9, dimClr);
+                int textX = wx + 5;
+                RGB brightClr = {(uint8_t)min(255, tempClr.r * 3 / 4 + 60),
+                                 (uint8_t)min(255, tempClr.g * 3 / 4 + 60),
+                                 (uint8_t)min(255, tempClr.b * 3 / 4 + 60)};
+                PixelFont::drawString(fb, endLine, textX, 9, brightClr);
             }
             _iconRegionValid = false;
         } else {
@@ -1068,14 +1253,15 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
             int normalGap = 6;
             int bigIconW = WeatherIcons::iconWidth(_weather.icon.c_str());
             int bigIconH = WeatherIcons::iconHeight(_weather.icon.c_str());
-            int total = timeW + 1 + ampmW + normalGap + bigIconW + 3 + tempW;
+            int ampmGap = 2;
+            int total = timeW + ampmGap + ampmW + normalGap + bigIconW + 3 + tempW;
             int xStart = max(0, (Framebuffer::W - total) / 2);
             int ty = max(0, (VISIBLE_H - digitH) / 2);
 
             int cx = drawTimeFn(xStart, ty);
             int ampmY = ty + digitH - 5;
-            PixelFont::drawString(fb, ampmBuf, cx + 1, ampmY, timeColor);
-            cx += 1 + ampmW;
+            PixelFont::drawString(fb, ampmBuf, cx + ampmGap, ampmY, timeColor);
+            cx += ampmGap + ampmW;
 
             int ix = cx + normalGap;
             int iy = max(0, (VISIBLE_H - bigIconH) / 2);
@@ -1104,13 +1290,13 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
         int weatherW = max(tempW, iw7);
         int weatherX = Framebuffer::W - weatherW - 1;
         int timeArea = weatherX - gap;
-        int totalTime = timeW + 1 + ampmW;
+        int totalTime = timeW + 2 + ampmW;
         int xStart = max(0, (timeArea - totalTime) / 2);
         int ty = max(0, (VISIBLE_H - digitH) / 2);
 
         int cx = drawTimeFn(xStart, ty);
         int ampmY = ty + digitH - 5;
-        PixelFont::drawString(fb, ampmBuf, cx + 1, ampmY, timeColor);
+        PixelFont::drawString(fb, ampmBuf, cx + 2, ampmY, timeColor);
 
         int tempX = weatherX + (weatherW - tempW) / 2;
         drawTempStr(fb, tempFBuf, tempX, 0, tempClr);
@@ -1177,22 +1363,101 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
 void ClockWeatherMode::renderForecastFlash() {
     if (_weather.hourlyCount < 24) return;
 
+    // Render forecast into framebuffer
     static Framebuffer fb;
     fb.clear();
     drawForecastFullscreen(fb);
 
-    Serial.println("[Clock] Forecast flash (10s hold)");
-    for (int i = 0; i < 5; i++) {
-        sendFrame(fb, 12);
-        delay(2000);
+    // Build a palette from the forecast frame
+    RGB palette[16];
+    int numColors = 0;
+    // Always include black as index 0
+    palette[numColors++] = {0, 0, 0};
+
+    // Collect unique colors (simple nearest-match with limited palette)
+    static uint8_t indexBuf[Framebuffer::W * Framebuffer::H];
+    for (int y = 0; y < Framebuffer::H; y++) {
+        for (int x = 0; x < Framebuffer::W; x++) {
+            RGB px = fb.getPixel(x, y);
+            if (px.isBlack()) {
+                indexBuf[y * Framebuffer::W + x] = 0;
+                continue;
+            }
+            int bestIdx = 0;
+            int bestDist = 999999;
+            for (int c = 0; c < numColors; c++) {
+                int dr = (int)px.r - palette[c].r;
+                int dg = (int)px.g - palette[c].g;
+                int db = (int)px.b - palette[c].b;
+                int d = dr*dr + dg*dg + db*db;
+                if (d < bestDist) { bestDist = d; bestIdx = c; }
+            }
+            if (bestDist > 1000 && numColors < 16) {
+                bestIdx = numColors;
+                palette[numColors++] = px;
+            }
+            indexBuf[y * Framebuffer::W + x] = bestIdx;
+        }
     }
+
+    // Encode as single-frame GIF
+    static uint8_t gifBuf[8192];
+    GifEncoder gif;
+    if (!gif.begin(gifBuf, sizeof(gifBuf), Framebuffer::W, Framebuffer::H,
+                   palette, numColors, 100)) {  // 1000cs = 10s display
+        Serial.println("[Forecast] GIF encoder init failed");
+        return;
+    }
+    if (!gif.addFrame(indexBuf)) {
+        Serial.println("[Forecast] GIF frame failed");
+        return;
+    }
+    size_t gifSize = gif.finish();
+
+    // Upload as full-screen GIF to program slot 1 (replaces weather GIF)
+    auto packets = buildGifProgram(gifBuf, gifSize, 1, 0, 0, Framebuffer::W, Framebuffer::H);
+    for (size_t i = 0; i < packets.size(); i++) {
+        _ble->send(packets[i]);
+        delay(80);
+    }
+    Serial.printf("[Forecast] Uploaded as GIF (%zu bytes, %d colors)\n", gifSize, numColors);
+
+    // Hold for 10 seconds, then replace forecast GIF with black 1x1
+    delay(10000);
+
+    static const uint8_t BLACK_GIF[] = {
+        0x47,0x49,0x46,0x38,0x39,0x61,
+        0x01,0x00,0x01,0x00,0x80,0x00,0x00,
+        0x00,0x00,0x00, 0x00,0x00,0x00,
+        0x2C,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x00,
+        0x02,0x02,0x44,0x01,0x00,
+        0x3B
+    };
+    auto clearPkts = buildGifProgram(BLACK_GIF, sizeof(BLACK_GIF), 1, 0, 0, 1, 1);
+    for (size_t i = 0; i < clearPkts.size(); i++) {
+        _ble->send(clearPkts[i]);
+        delay(80);
+    }
+    delay(200);
+    Serial.println("[Forecast] Cleared forecast GIF");
+
+    _splitGifActive = false;
+    _splitGifIcon = "";
+    _splitGifTemp = -999;
     _forceRedraw = true;
     _hasPrevFrame = false;
 }
 
 void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
-    float tLow = _weather.tempLow;
-    float tHigh = _weather.tempHigh;
+    struct tm ti;
+    bool haveTime = getLocalTime(&ti);
+    // After 6PM, show tomorrow's forecast instead of today's
+    bool showTomorrow = haveTime && ti.tm_hour >= 20 && _weather.tomorrowCount >= 24;
+
+    float* hourlyData = showTomorrow ? _weather.tomorrowHourly : _weather.hourly;
+    int* precipProb = showTomorrow ? _weather.tomorrowPrecipProb : _weather.hourlyPrecipProb;
+    float tLow = showTomorrow ? _weather.tomorrowLow : _weather.tempLow;
+    float tHigh = showTomorrow ? _weather.tomorrowHigh : _weather.tempHigh;
     float tRange = max(1.0f, tHigh - tLow);
 
     for (int x = 0; x < Framebuffer::W; x++) {
@@ -1200,30 +1465,54 @@ void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
         int h0 = (int)hourF;
         int h1 = min(h0 + 1, 23);
         float fracH = hourF - h0;
-        float tempVal = _weather.hourly[h0] * (1.0f - fracH) + _weather.hourly[h1] * fracH;
+        float tempVal = hourlyData[h0] * (1.0f - fracH) + hourlyData[h1] * fracH;
         float frac = (tempVal - tLow) / tRange;
         int row = VISIBLE_H - 1 - (int)round(frac * (VISIBLE_H - 1));
         RGB c = tempColor((int)tempVal);
         RGB dim = {(uint8_t)(c.r / 4), (uint8_t)(c.g / 4), (uint8_t)(c.b / 4)};
         for (int fy = row; fy < VISIBLE_H; fy++)
             fb.putPixel(x, fy, (fy == row) ? c : dim);
+
+        int h = (int)hourF;
+        if (h < 24) {
+            int prob = precipProb[h];
+            if (prob > 0) {
+                uint8_t b;
+                if (prob >= 60)      b = 200;
+                else if (prob >= 30) b = 90;
+                else                 b = 35;
+                RGB rain = {0, 0, b};
+                fb.putPixel(x, VISIBLE_H - 1, rain);
+                fb.putPixel(x, VISIBLE_H - 2, rain);
+            }
+        }
     }
 
-    struct tm ti;
-    if (getLocalTime(&ti)) {
-        float pxPerHour = (float)Framebuffer::W / 24.0f;
-        int nowX = (int)(ti.tm_hour * pxPerHour + pxPerHour / 2);
-        RGB white = {255, 255, 255};
-        for (int y = 0; y < VISIBLE_H; y++)
-            if (nowX >= 0 && nowX < Framebuffer::W)
-                fb.putPixel(nowX, y, white);
+    if (haveTime) {
+        if (!showTomorrow) {
+            // Draw "now" marker for today's forecast
+            float pxPerHour = (float)Framebuffer::W / 24.0f;
+            int nowX = (int)(ti.tm_hour * pxPerHour + pxPerHour / 2);
+            RGB white = {255, 255, 255};
+            for (int y = 0; y < VISIBLE_H; y++)
+                if (nowX >= 0 && nowX < Framebuffer::W)
+                    fb.putPixel(nowX, y, white);
+        }
 
-        char timeBuf[8];
-        int h12 = ti.tm_hour % 12;
-        if (h12 == 0) h12 = 12;
-        snprintf(timeBuf, sizeof(timeBuf), "%d:%02d", h12, ti.tm_min);
-        RGB timeBlue = {50, 130, 255};
-        int tw = PixelFont::stringWidth(timeBuf);
+        // Label: current time + temp for today, "Tmrw" + hi/lo for tomorrow
+        char labelBuf[16];
+        RGB labelColor;
+        if (showTomorrow) {
+            snprintf(labelBuf, sizeof(labelBuf), "Tmrw %d/%d",
+                (int)_weather.tomorrowHigh, (int)_weather.tomorrowLow);
+            labelColor = {180, 140, 255};
+        } else {
+            int h12 = ti.tm_hour % 12;
+            if (h12 == 0) h12 = 12;
+            snprintf(labelBuf, sizeof(labelBuf), "%d:%02d", h12, ti.tm_min);
+            labelColor = {50, 130, 255};
+        }
+        int tw = PixelFont::stringWidth(labelBuf);
 
         uint8_t ir, ig, ib;
         iconColor(_weather.icon.c_str(), ir, ig, ib);
@@ -1239,7 +1528,7 @@ void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
         fb.fillRect(0, 0, labelW + 2, 5, {0, 0, 0});
 
         int cx = 1;
-        PixelFont::drawString(fb, timeBuf, cx, 0, timeBlue);
+        PixelFont::drawString(fb, labelBuf, cx, 0, labelColor);
         cx += tw + 2;
 
         static const char* TINY_SUN[]  ={"  #  ","# # #"," ### ","# # #","  #  "};
@@ -1268,15 +1557,15 @@ void ClockWeatherMode::drawForecastFullscreen(Framebuffer& fb) {
     }
 
     char hiBuf[8];
-    snprintf(hiBuf, sizeof(hiBuf), "%d", (int)_weather.tempHigh);
-    RGB hiC = tempColor((int)_weather.tempHigh);
+    snprintf(hiBuf, sizeof(hiBuf), "%d", (int)tHigh);
+    RGB hiC = tempColor((int)tHigh);
     int hiW = PixelFont::stringWidth(hiBuf);
     fb.fillRect(Framebuffer::W - hiW - 2, 0, Framebuffer::W - 1, 5, {0, 0, 0});
     PixelFont::drawString(fb, hiBuf, Framebuffer::W - hiW - 1, 0, hiC);
 
     char loBuf[8];
-    snprintf(loBuf, sizeof(loBuf), "%d", (int)_weather.tempLow);
-    RGB loC = tempColor((int)_weather.tempLow);
+    snprintf(loBuf, sizeof(loBuf), "%d", (int)tLow);
+    RGB loC = tempColor((int)tLow);
     int loW = PixelFont::stringWidth(loBuf);
     fb.fillRect(Framebuffer::W - loW - 2, VISIBLE_H - 6, Framebuffer::W - 1, VISIBLE_H - 1, {0, 0, 0});
     PixelFont::drawString(fb, loBuf, Framebuffer::W - loW - 1, VISIBLE_H - 5, loC);
@@ -1634,13 +1923,11 @@ void ClockWeatherMode::fetchNotifications() {
 
 void ClockWeatherMode::fetchWeatherAlerts() {
     HTTPClient http;
-    String url = "https://api.weather.gov/alerts/active?point=" +
-        String(WEATHER_LAT, 3) + "," + String(WEATHER_LON, 3) +
-        "&status=actual&urgency=Immediate,Expected";
+    String url = "http://nws-alerts-proxy.matthew-s-schwartz.workers.dev/"
+                 "?lat=" + String(WEATHER_LAT, 3) +
+                 "&lon=" + String(WEATHER_LON, 3);
     http.begin(url);
     http.setTimeout(10000);
-    http.addHeader("User-Agent", "ESP32-Sign/1.0");
-    http.addHeader("Accept", "application/geo+json");
     int code = http.GET();
     Serial.printf("[Alerts] Fetch → %d\n", code);
 
@@ -1651,10 +1938,10 @@ void ClockWeatherMode::fetchWeatherAlerts() {
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, payload);
         if (!err) {
-            JsonArray features = doc["features"].as<JsonArray>();
-            for (JsonObject f : features) {
+            JsonArray alerts = doc["alerts"].as<JsonArray>();
+            for (JsonVariant a : alerts) {
                 if (_alertCount >= 3) break;
-                String event = f["properties"]["event"] | "";
+                String event = a.as<String>();
                 if (event.length() > 0) {
                     _weatherAlerts[_alertCount++] = event;
                     Serial.printf("[Alerts] Active: %s\n", event.c_str());
@@ -1671,6 +1958,7 @@ void ClockWeatherMode::fetchWeatherAlerts() {
 // ---------------------------------------------------------------------------
 
 void ClockWeatherMode::scrollHeadline(const String& text) {
+    stopGifProgram();
     // Give plenty of time for full scroll — sign at speed 10 with fontSize 12
     // is roughly 0.4s per character. Duration must exceed scroll time.
     int scrollSec = max((int)(text.length() * 0.45f), 10);
@@ -1709,6 +1997,33 @@ void ClockWeatherMode::scrollHeadline(const String& text) {
 // ---------------------------------------------------------------------------
 // Send frame
 // ---------------------------------------------------------------------------
+
+void ClockWeatherMode::stopGifProgram() {
+    if (!_splitGifActive && _displayMode == DISPLAY_RT_DRAW) return;
+
+    // Upload a 1x1 single-frame black GIF to program slot 1 in a tiny off-screen region
+    // This replaces the weather GIF without triggering the built-in car demo
+    // (deleting the program triggers the demo)
+    static const uint8_t BLACK_GIF[] = {
+        0x47,0x49,0x46,0x38,0x39,0x61, // GIF89a
+        0x01,0x00,0x01,0x00,0x80,0x00,0x00, // 1x1, 1 color
+        0x00,0x00,0x00, 0x00,0x00,0x00, // black palette
+        0x2C,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x00, // image descriptor
+        0x02,0x02,0x44,0x01,0x00, // LZW min 2, data
+        0x3B // trailer
+    };
+    auto pkts = buildGifProgram(BLACK_GIF, sizeof(BLACK_GIF), 1, 0, 0, 1, 1);
+    for (size_t i = 0; i < pkts.size(); i++) {
+        _ble->send(pkts[i]);
+        delay(80);
+    }
+    delay(200);
+
+    _splitGifActive = false;
+    _hasPrevFrame = false;
+    _forceRedraw = true;
+    Serial.println("[GIF] Replaced GIF with blank for overlay content");
+}
 
 void ClockWeatherMode::sendFrame(Framebuffer& fb, int maxColors) {
     auto packets = fb.buildRtDrawPackets(maxColors);
@@ -1830,6 +2145,225 @@ bool ClockWeatherMode::generateAndUploadGif() {
     }
 
     Serial.println("[GIF] Upload complete");
+    return true;
+}
+
+bool ClockWeatherMode::generateSplitWeatherGif(int gifX, int gifW) {
+    const int GIF_H = Framebuffer::H;
+    const int NUM_FRAMES = 6;
+    const int FRAME_DELAY_CS = 15;
+
+    RGB palette[16];
+    int numColors = 0;
+    buildAnimPalette(palette, &numColors);
+
+    static uint8_t gifBuf[8192];
+    GifEncoder gif;
+    if (!gif.begin(gifBuf, sizeof(gifBuf), gifW, GIF_H, palette, numColors, FRAME_DELAY_CS)) {
+        Serial.println("[Split-GIF] Encoder init failed");
+        return false;
+    }
+
+    // Weather content to bake into GIF
+    RGB tempClr = tempColor(_weather.temp);
+    char tempLine[8];
+    snprintf(tempLine, sizeof(tempLine), "%dF", _weather.temp);
+    int tempLineW = tempStrWidth(tempLine);
+
+    char endLine[10] = "";
+    struct tm now_tm;
+    if (getLocalTime(&now_tm) && _weather.hourlyCount >= 24) {
+        int curHour = now_tm.tm_hour;
+        int clearHour = -1;
+        for (int h = curHour + 1; h < 24; h++) {
+            int wmo = _weather.hourlyWMO[h];
+            bool precip = (wmo >= 51 && wmo <= 67) || (wmo >= 71 && wmo <= 77) ||
+                          (wmo >= 80 && wmo <= 86) || (wmo >= 95 && wmo <= 99);
+            if (!precip) { clearHour = h; break; }
+        }
+        if (clearHour >= 0) {
+            int h12 = clearHour % 12;
+            if (h12 == 0) h12 = 12;
+            snprintf(endLine, sizeof(endLine), "Til %d%s",
+                h12, clearHour >= 12 ? "P" : "A");
+        } else {
+            snprintf(endLine, sizeof(endLine), "All day");
+        }
+    }
+    int endLineW = endLine[0] ? PixelFont::stringWidth(endLine) : 0;
+
+    auto ptype = WeatherParticles::typeFromIcon(_weather.icon.c_str());
+    static Framebuffer fb;
+    static uint8_t indexBuf[48 * 22]; // max gifW * GIF_H
+
+    for (int f = 0; f < NUM_FRAMES; f++) {
+        fb.clear();
+
+        // Draw weather content at absolute positions, will extract gifX region
+        int wx = gifX + 2; // small left margin within GIF
+        drawTempStr(fb, tempLine, wx, 1, tempClr);
+        if (endLine[0]) {
+            RGB drop = {60, 120, 255};
+            int dx = wx, dy = 9;
+            fb.putPixel(dx+1, dy,   drop);
+            fb.putPixel(dx,   dy+1, drop);
+            fb.putPixel(dx+1, dy+1, drop);
+            fb.putPixel(dx+2, dy+1, drop);
+            fb.putPixel(dx,   dy+2, drop);
+            fb.putPixel(dx+1, dy+2, drop);
+            fb.putPixel(dx+2, dy+2, drop);
+            fb.putPixel(dx,   dy+3, drop);
+            fb.putPixel(dx+1, dy+3, drop);
+            fb.putPixel(dx+2, dy+3, drop);
+            fb.putPixel(dx+1, dy+4, drop);
+            int textX = wx + 5;
+            RGB brightClr = {(uint8_t)min(255, tempClr.r * 3 / 4 + 60),
+                             (uint8_t)min(255, tempClr.g * 3 / 4 + 60),
+                             (uint8_t)min(255, tempClr.b * 3 / 4 + 60)};
+            PixelFont::drawString(fb, endLine, textX, 9, brightClr);
+        }
+
+        // Rain particles across the whole screen, we extract just our region
+        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES);
+
+        // Extract the GIF region and quantize
+        for (int y = 0; y < GIF_H; y++) {
+            for (int x = 0; x < gifW; x++) {
+                RGB px = fb.getPixel(gifX + x, y);
+                int bestIdx = 0;
+                if (!px.isBlack()) {
+                    int bestDist = gifColorDist(px, palette[0]);
+                    for (int c = 1; c < numColors; c++) {
+                        int d = gifColorDist(px, palette[c]);
+                        if (d < bestDist) { bestDist = d; bestIdx = c; }
+                    }
+                }
+                indexBuf[y * gifW + x] = bestIdx;
+            }
+        }
+
+        if (!gif.addFrame(indexBuf)) {
+            Serial.printf("[Split-GIF] Frame %d failed\n", f);
+            return false;
+        }
+    }
+
+    size_t gifSize = gif.finish();
+    Serial.printf("[Split-GIF] %dx%d at x=%d, %d frames, %zu bytes\n",
+        gifW, GIF_H, gifX, NUM_FRAMES, gifSize);
+
+    auto packets = buildGifProgram(gifBuf, gifSize, 1, gifX, 0, gifW, GIF_H);
+    for (size_t i = 0; i < packets.size(); i++) {
+        _ble->send(packets[i]);
+        delay(100);
+    }
+    return true;
+}
+
+void ClockWeatherMode::setAnimStyle(int style) {
+    _animStyle = (style == 0) ? 0 : 1;
+    _forceRedraw = true;
+    _hasPrevFrame = false;
+    _splitGifActive = false;
+    _displayMode = DISPLAY_RT_DRAW; // force re-evaluation
+    Preferences prefs;
+    prefs.begin("clock", false);
+    prefs.putInt("animStyle", _animStyle);
+    prefs.end();
+    Serial.printf("[Clock] Animation style set to %s\n",
+        _animStyle == 1 ? "split" : "full");
+}
+
+bool ClockWeatherMode::testRegionalGif() {
+    const int GIF_W = 30, GIF_H = Framebuffer::H;
+    const int GIF_X = Framebuffer::W - GIF_W;
+    const int NUM_FRAMES = 6;
+    const int FRAME_DELAY_CS = 15;
+
+    // Freeze display updates for 15 seconds
+    _testHoldUntil = millis() + 15000;
+    Serial.println("[Test] Starting regional GIF test (15s hold)");
+
+    // Palette: black + rain particle colors
+    RGB palette[16];
+    int numColors = 0;
+    palette[numColors++] = {0, 0, 0};
+
+    auto ptype = WeatherParticles::typeFromIcon("rain");
+    RGB pColors[4];
+    int pCount = 0;
+    WeatherParticles::getParticleColors(ptype, pColors, &pCount);
+    for (int i = 0; i < pCount && numColors < 16; i++)
+        palette[numColors++] = pColors[i];
+
+    static uint8_t gifBuf[4096];
+    GifEncoder gif;
+    if (!gif.begin(gifBuf, sizeof(gifBuf), GIF_W, GIF_H, palette, numColors, FRAME_DELAY_CS)) {
+        Serial.println("[Test] GIF encoder init failed");
+        _testHoldUntil = 0;
+        return false;
+    }
+
+    static Framebuffer fb;
+    static uint8_t indexBuf[30 * 22];
+
+    for (int f = 0; f < NUM_FRAMES; f++) {
+        fb.clear();
+        WeatherParticles::renderParticles(fb, ptype, f, NUM_FRAMES);
+
+        for (int y = 0; y < GIF_H; y++) {
+            for (int x = 0; x < GIF_W; x++) {
+                RGB px = fb.getPixel(GIF_X + x, y);
+                int bestIdx = 0;
+                if (!px.isBlack()) {
+                    int bestDist = gifColorDist(px, palette[0]);
+                    for (int c = 1; c < numColors; c++) {
+                        int d = gifColorDist(px, palette[c]);
+                        if (d < bestDist) { bestDist = d; bestIdx = c; }
+                    }
+                }
+                indexBuf[y * GIF_W + x] = bestIdx;
+            }
+        }
+
+        if (!gif.addFrame(indexBuf)) {
+            Serial.printf("[Test] Frame %d failed\n", f);
+            _testHoldUntil = 0;
+            return false;
+        }
+    }
+
+    size_t gifSize = gif.finish();
+    Serial.printf("[Test] Regional GIF: %dx%d at (%d,0), %zu bytes\n",
+        GIF_W, GIF_H, GIF_X, gifSize);
+
+    // Step 1: Clear the entire screen
+    static Framebuffer blankFb;
+    blankFb.clear();
+    sendFrame(blankFb, 1);
+    Serial.println("[Test] Screen cleared");
+    delay(1000);
+
+    // Step 2: Upload the regional rain GIF to the right side
+    auto packets = buildGifProgram(gifBuf, gifSize, 1, GIF_X, 0, GIF_W, GIF_H);
+    Serial.printf("[Test] Uploading %d GIF packets (region %d,0 %dx%d)\n",
+        (int)packets.size(), GIF_X, GIF_W, GIF_H);
+    for (size_t i = 0; i < packets.size(); i++) {
+        _ble->send(packets[i]);
+        delay(100);
+    }
+    Serial.println("[Test] Regional GIF uploaded, waiting 3s to see if it renders...");
+    delay(3000);
+
+    // Step 3: rt_draw the clock on the left side only
+    static Framebuffer clockFb;
+    clockFb.clear();
+    drawClockFace(clockFb);
+    sendRegion(clockFb, 0, 0, GIF_X - 1, VISIBLE_H - 1, 12);
+    Serial.println("[Test] rt_draw sent to left region. Watch for 15s!");
+
+    _hasPrevFrame = false;
+    _forceRedraw = true;
     return true;
 }
 

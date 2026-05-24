@@ -23,6 +23,10 @@ static void connectWiFi() {
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+        // Use Google DNS as fallback for reliable resolution (e.g. api.weather.gov)
+        IPAddress dns1(8, 8, 8, 8);
+        IPAddress dns2(8, 8, 4, 4);
+        WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), dns1, dns2);
     } else {
         Serial.println("\n[WiFi] Connection failed! Will retry...");
     }
@@ -62,6 +66,12 @@ void setup() {
     digitalWrite(LED_PIN, LOW);
     delay(1000);
     Serial.println("\n=== LED Sign Controller ===");
+    if (psramFound()) {
+        Serial.printf("[PSRAM] Found: %u bytes total, %u free\n",
+            ESP.getPsramSize(), ESP.getFreePsram());
+    } else {
+        Serial.println("[PSRAM] Not found");
+    }
 
     connectWiFi();
     setupNTP();
@@ -71,6 +81,11 @@ void setup() {
     delay(2000);
     Serial.println("[BLE] Starting BLE after WiFi settle...");
     signBLE.begin();
+    signBLE.onNotify([](const uint8_t* data, size_t len) {
+        Serial.printf("[BLE-NOTIFY] %d bytes:", len);
+        for (size_t i = 0; i < len; i++) Serial.printf(" %02X", data[i]);
+        Serial.println();
+    });
     modeManager.begin(&signBLE);
     webServer.begin(&signBLE, &modeManager);
 
