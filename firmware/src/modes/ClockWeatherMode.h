@@ -114,6 +114,9 @@ private:
     int _lastTempSent = -999;
     String _lastIconSent;
     int _minRegionX0 = 0, _minRegionY0 = 0, _minRegionX1 = 0, _minRegionY1 = 0;
+    int _minOnesX0 = 0;
+    int _prevMinRegionX0 = 0, _prevMinRegionX1 = 0, _prevMinOnesX0 = 0;
+    int _lastMinTens = -1;
     bool _minRegionValid = false;
     int _clockLayout = 0;  // 0=normal, 1=large-statusbar, 2=large-stacked, 3=custom
     int _fontId = 0;       // 0=standard, 1=rounded, 2=digital, 3=detailed5x7

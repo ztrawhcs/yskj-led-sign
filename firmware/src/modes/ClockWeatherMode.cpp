@@ -828,6 +828,9 @@ void ClockWeatherMode::fetchWeather() {
                     _weather.tempHigh = hi;
                     _weather.tempLow = lo;
                 }
+                // Clamp so hi/lo never contradict current observation
+                if (_weather.temp > _weather.tempHigh) _weather.tempHigh = _weather.temp;
+                if (_weather.temp < _weather.tempLow) _weather.tempLow = _weather.temp;
 
                 // Tomorrow: indices 24-47
                 _weather.tomorrowCount = 0;
@@ -898,17 +901,27 @@ void ClockWeatherMode::renderClock() {
         && _weather.icon == _lastIconSent;
 
     static Framebuffer fb;
+    // Save previous region bounds before drawClockFace overwrites them
+    _prevMinRegionX0 = _minRegionX0;
+    _prevMinRegionX1 = _minRegionX1;
+    _prevMinOnesX0 = _minOnesX0;
     fb.clear();
     drawClockFace(fb);
 
     if (minuteOnly) {
-        int rx0 = max(0, _minRegionX0);
+        int minTens = ti.tm_min / 10;
+        bool tensChanged = (minTens != _lastMinTens);
+        _lastMinTens = minTens;
+        // Union current and previous frame regions to cover proportional width changes
+        int curX0 = tensChanged ? _minRegionX0 : _minOnesX0;
+        int prevX0 = tensChanged ? _prevMinRegionX0 : _prevMinOnesX0;
+        int rx0 = max(0, min(curX0, prevX0));
         int ry0 = max(0, _minRegionY0);
-        int rx1 = min((int)Framebuffer::W - 1, _minRegionX1);
+        int rx1 = min((int)Framebuffer::W - 1, max(_minRegionX1, _prevMinRegionX1));
         int ry1 = min((int)Framebuffer::VISIBLE_H - 1, _minRegionY1);
         sendRegion(fb, rx0, ry0, rx1, ry1, 4);
-        Serial.printf("[Clock] Minute-only update %d:%02d region [%d,%d]-[%d,%d]\n",
-            hour12, ti.tm_min, rx0, ry0, rx1, ry1);
+        Serial.printf("[Clock] Minute update %d:%02d region [%d,%d]-[%d,%d]%s\n",
+            hour12, ti.tm_min, rx0, ry0, rx1, ry1, tensChanged ? " (tens)" : "");
     } else if (_hasPrevFrame) {
         int dx0 = Framebuffer::W, dy0 = Framebuffer::VISIBLE_H, dx1 = -1, dy1 = -1;
         for (int y = 0; y < Framebuffer::VISIBLE_H; y++) {
@@ -1178,7 +1191,7 @@ void ClockWeatherMode::drawClockFace(Framebuffer& fb) {
         for (int i = 0; i < 2; i++) {
             drawScaledDigit(fb, minBuf[i] - '0', cx, startY, fid, scale, timeColor, aa);
             cx += digitAdv(minBuf[i]);
-            if (i == 0) cx += digitGap;
+            if (i == 0) { _minOnesX0 = cx + digitGap; cx += digitGap; }
         }
         _minRegionX1 = cx + (aa && scale >= 2 ? 1 : 0);
         _minRegionY1 = startY + digitH + (scale >= 2 ? 1 : 0);
@@ -1454,7 +1467,7 @@ void ClockWeatherMode::renderForecastFlash() {
         0x02,0x02,0x44,0x01,0x00,
         0x3B
     };
-    auto clearPkts = buildGifProgram(BLACK_GIF, sizeof(BLACK_GIF), 1, 0, 0, Framebuffer::W, Framebuffer::H);
+    auto clearPkts = buildGifProgram(BLACK_GIF, sizeof(BLACK_GIF), 1, 0, 0, 1, 1);
     for (size_t i = 0; i < clearPkts.size(); i++) {
         _ble->send(clearPkts[i]);
         delay(80);
